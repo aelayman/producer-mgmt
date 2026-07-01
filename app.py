@@ -34,9 +34,13 @@ ADJUSTING THE MATCHING:
 - The slider in the web UI lets you tune this in real time.
 """
 
+import csv
 import re
-import streamlit as st
+import sqlite3
+from datetime import datetime
+from io import StringIO
 from pathlib import Path
+import streamlit as st
 from thefuzz import fuzz  # fuzzy string matching library (uses Levenshtein distance)
 
 
@@ -47,6 +51,7 @@ from thefuzz import fuzz  # fuzzy string matching library (uses Levenshtein dist
 # It lives in the same folder as this script.
 # =============================================================================
 MASTER_LIST_PATH = Path(__file__).parent / "master_reference_list.txt"
+ARTIST_DATABASE_PATH = Path(__file__).parent / "artist_database.db"
 
 
 def load_master_list() -> str:
@@ -85,6 +90,214 @@ def append_to_master_list(new_entries: str) -> int:
         f.write(new_entries.strip() + "\n")
 
     return valid_count
+
+
+def get_db_connection() -> sqlite3.Connection:
+    """Create a SQLite database connection for the artist database."""
+    conn = sqlite3.connect(ARTIST_DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_artist_database() -> None:
+    """Create the artist database tables if they do not already exist."""
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS artist_appearances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                artist_name TEXT NOT NULL,
+                handle TEXT,
+                url TEXT,
+                track_title TEXT,
+                appearance_count INTEGER NOT NULL DEFAULT 1,
+                dj_names TEXT,
+                set_names TEXT,
+                source_texts TEXT,
+                notes TEXT,
+                first_seen TEXT,
+                last_seen TEXT,
+                UNIQUE(artist_name, track_title)
+            )
+            """
+        )
+
+
+def append_unique_value(existing: str | None, new_value: str) -> str:
+    """Append a value to a semicolon-separated list without duplicates."""
+    if not new_value:
+        return existing or ""
+
+    values = [item.strip() for item in (existing or "").split(";") if item.strip()]
+    if new_value.strip() not in values:
+        values.append(new_value.strip())
+    return "; ".join(values)
+
+
+def load_artist_database() -> list[dict]:
+    """Load the artist database from SQLite."""
+    init_artist_database()
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT artist_name, handle, url, track_title, appearance_count, dj_names,
+                   set_names, source_texts, notes, first_seen, last_seen
+            FROM artist_appearances
+            ORDER BY artist_name, track_title
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def append_to_artist_database(entries: list[dict], dj_name: str = "", set_name: str = "") -> int:
+    """Upsert parsed artist/tag entries into the SQLite artist database."""
+    if not entries:
+        return 0
+
+    init_artist_database()
+    now = datetime.utcnow().isoformat()
+
+    with get_db_connection() as conn:
+        for entry in entries:
+            artist_name = (entry.get("artist_name") or "Unknown artist").strip()
+            track_title = (entry.get("track_title") or "").strip()
+            handle = (entry.get("handle") or "").strip()
+            url = (entry.get("url") or "").strip()
+            source_text = (entry.get("source_text") or "").strip()
+            notes = (entry.get("notes") or "").strip()
+
+            existing = conn.execute(
+                "SELECT id, appearance_count, dj_names, set_names, source_texts, notes FROM artist_appearances WHERE artist_name = ? AND track_title = ?",
+                (artist_name, track_title),
+            ).fetchone()
+
+            if existing:
+                appearance_count = existing["appearance_count"] + 1
+                dj_names = append_unique_value(existing["dj_names"], dj_name)
+                set_names = append_unique_value(existing["set_names"], set_name)
+                source_texts = append_unique_value(existing["source_texts"], source_text)
+                notes_value = append_unique_value(existing["notes"], notes) if notes else existing["notes"] or ""
+                conn.execute(
+                    """
+                    UPDATE artist_appearances
+                    SET handle = ?, url = ?, appearance_count = ?, dj_names = ?, set_names = ?,
+                        source_texts = ?, notes = ?, last_seen = ?
+                    WHERE id = ?
+                    """,
+                    (handle, url, appearance_count, dj_names, set_names, source_texts, notes_value, now, existing["id"]),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO artist_appearances (
+                        artist_name, handle, url, track_title, appearance_count, dj_names,
+                        set_names, source_texts, notes, first_seen, last_seen
+                    ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        artist_name,
+                        handle,
+                        url,
+                        track_title,
+                        dj_name or "",
+                        set_name or "",
+                        source_text or "",
+                        notes or "",
+                        now,
+                        now,
+                    ),
+                )
+
+        conn.commit()
+    return len(entries)
+
+
+def export_artist_database_csv() -> str:
+    """Export the artist database as a CSV string."""
+    rows = load_artist_database()
+    output = StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=[
+            "artist_name",
+            "handle",
+            "url",
+            "track_title",
+            "appearance_count",
+            "dj_names",
+            "set_names",
+            "source_texts",
+            "notes",
+            "first_seen",
+            "last_seen",
+        ],
+    )
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return output.getvalue()
+
+
+def parse_soundcloud_line(line: str) -> list[dict]:
+    """
+    Parse a SoundCloud-style line into one artist database row.
+
+    Expected examples:
+    - Mor Elian @[morelian](https://soundcloud.com/morelian) - Swerving Mantis
+    - Gobekli @[gobekli](https://soundcloud.com/gobekli) - Edfu Texts (Ronan Remix) @[ronan-music](https://soundcloud.com/ronan-music)
+    """
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return []
+
+    line_cleaned = re.sub(r"^\d+[\.\)]\s*", "", line).strip()
+    if not line_cleaned:
+        return []
+
+    pattern = re.compile(r"@\[([^\]]+)\]\((https?://[^)]+)\)|@([A-Za-z0-9._-]+)")
+    matches = list(pattern.finditer(line_cleaned))
+
+    dash_match = re.search(r"\s*[–—-]\s*", line_cleaned)
+    dash_index = dash_match.start() if dash_match else len(line_cleaned)
+
+    selected_match = None
+    for match in matches:
+        if match.start() < dash_index:
+            selected_match = match
+            break
+    if selected_match is None and matches:
+        selected_match = matches[0]
+
+    if selected_match is not None:
+        if selected_match.group(1):
+            handle = selected_match.group(1)
+            url = selected_match.group(2)
+        else:
+            handle = selected_match.group(3)
+            url = f"https://soundcloud.com/{handle}"
+    else:
+        handle = ""
+        url = ""
+
+    artist_part = line_cleaned[:dash_index].strip() if dash_match else line_cleaned
+    artist_name = re.sub(pattern, "", artist_part)
+    artist_name = re.sub(r"\s+", " ", artist_name).strip(" -–—")
+    artist_name = artist_name or "Unknown artist"
+
+    track_title = ""
+    if dash_match:
+        track_title = line_cleaned[dash_match.end():].strip()
+        track_title = re.sub(pattern, "", track_title)
+        track_title = re.sub(r"\s+", " ", track_title).strip(" -–—")
+
+    return [{
+        "artist_name": artist_name,
+        "handle": handle,
+        "url": url,
+        "track_title": track_title,
+        "source_text": line,
+        "notes": "",
+    }]
 
 
 # =============================================================================
@@ -355,8 +568,8 @@ with st.sidebar:
     )
 
 
-# --- TWO TABS: main matching function and master list management ---
-tab_match, tab_manage = st.tabs(["🔍 Find Tags", "📋 Manage Master List"])
+# --- THREE TABS: main matching function, artist database import, and master list management ---
+tab_match, tab_database, tab_manage = st.tabs(["🔍 Find Tags", "🎵 Build Artist Database", "📋 Manage Master List"])
 
 
 # =============================================================================
@@ -449,7 +662,60 @@ with tab_match:
 
 
 # =============================================================================
-# TAB 2: MANAGE MASTER LIST
+# TAB 2: BUILD ARTIST DATABASE
+# Lets the user paste SoundCloud-style artist/tag lists and save them to CSV.
+# =============================================================================
+with tab_database:
+    st.subheader("Build your artist/tag database")
+    st.markdown(
+        "Paste one or more SoundCloud-style lines and save them as structured rows with artist name, handle, and full URL."
+    )
+
+    st.markdown("#### Import a new setlist batch")
+    st.caption("Each batch can be tagged with the DJ and the set/date so it can be tracked over time.")
+
+    db_upload = st.file_uploader("Upload a list of SoundCloud entries", type=["txt", "csv"], key="db_upload")
+    db_text = st.text_area(
+        "Or paste your list here:",
+        height=300,
+        placeholder="1. Mor Elian @[morelian](https://soundcloud.com/morelian) - Swerving Mantis\n2. Gobekli @[gobekli](https://soundcloud.com/gobekli) - Edfu Texts (Ronan Remix) @[ronan-music](https://soundcloud.com/ronan-music)",
+        key="db_text",
+    )
+    dj_name = st.text_input("DJ who played this set", value="", key="dj_name")
+    set_name = st.text_input("Set / date / notes", value="", key="set_name")
+
+    if db_upload:
+        db_text = db_upload.read().decode("utf-8", errors="replace")
+        st.text_area("Uploaded content (preview):", db_text[:2000], height=150, disabled=True)
+
+    if st.button("💾 Save to artist database", type="primary", use_container_width=True):
+        if not db_text or not db_text.strip():
+            st.error("Please provide some entries to save.")
+        else:
+            parsed_entries = []
+            for line in db_text.splitlines():
+                parsed_entries.extend(parse_soundcloud_line(line))
+
+            if not parsed_entries:
+                st.warning("No artist/tag entries were found. Make sure each line contains an @ handle or SoundCloud link.")
+            else:
+                count = append_to_artist_database(parsed_entries, dj_name=dj_name, set_name=set_name)
+                st.success(f"✅ Saved **{count}** entries to the artist database.")
+                st.dataframe(load_artist_database(), use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.caption(f"Database file: {ARTIST_DATABASE_PATH}")
+    if ARTIST_DATABASE_PATH.exists():
+        st.download_button(
+            "Download current CSV",
+            data=export_artist_database_csv(),
+            file_name="artist_database.csv",
+            mime="text/csv",
+        )
+
+
+# =============================================================================
+# TAB 3: MANAGE MASTER LIST
 # Lets the user view the current master list, add new entries, or bulk-paste
 # a whole new batch. Changes are saved to master_reference_list.txt.
 # =============================================================================
