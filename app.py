@@ -730,42 +730,44 @@ with tab_database:
         "Paste one or more SoundCloud-style lines and save them as structured rows with artist name, handle, and full URL."
     )
 
-    st.markdown("#### Import a new setlist batch")
-    st.caption("Each batch can be tagged with the DJ and the set/date so it can be tracked over time.")
+    st.markdown("#### Add one track entry at a time")
+    st.caption("Enter a single artist/track entry, along with the set number, date, and the radio show.")
 
-    db_upload = st.file_uploader("Upload a list of SoundCloud entries", type=["txt", "csv"], key="db_upload")
-    db_text = st.text_area(
-        "Or paste your list here:",
-        height=300,
-        placeholder="1. Mor Elian @[morelian](https://soundcloud.com/morelian) - Swerving Mantis\n2. Gobekli @[gobekli](https://soundcloud.com/gobekli) - Edfu Texts (Ronan Remix) @[ronan-music](https://soundcloud.com/ronan-music)",
-        key="db_text",
-    )
-    dj_name = st.text_input("DJ who played this set", value="", key="dj_name")
-    set_name = st.text_input("Set / date / notes", value="", key="set_name")
-    artist_location = st.text_input("Artist location (city/country/general location, optional)", value="", key="artist_location")
+    with st.form("single_entry_form"):
+        set_number = st.text_input("Set number", value="", key="set_number")
+        artist_name = st.text_input("Artist name", value="", key="artist_name")
+        track_title = st.text_input("Track title", value="", key="track_title")
+        artist_handle = st.text_input("SoundCloud handle (optional)", value="", key="artist_handle")
+        artist_url = st.text_input("SoundCloud URL (optional)", value="", key="artist_url")
+        entry_date = st.text_input("Date", value="", key="entry_date")
+        artist_location = st.text_input("Artist location (city/country/general location, optional)", value="", key="artist_location")
+        radio_show = st.radio(
+            "Radio show",
+            ["NO SIGNAL", "ABYSS"],
+            index=0,
+            key="radio_show",
+        )
+        submitted = st.form_submit_button("💾 Save entry")
 
-    if db_upload:
-        db_text = db_upload.read().decode("utf-8", errors="replace")
-        st.text_area("Uploaded content (preview):", db_text[:2000], height=150, disabled=True)
-
-    if st.button("💾 Save to artist database", type="primary", use_container_width=True):
-        if not db_text or not db_text.strip():
-            st.error("Please provide some entries to save.")
-        else:
-            parsed_entries = []
-            for line in db_text.splitlines():
-                parsed_entries.extend(parse_soundcloud_line(line))
-
-            if not parsed_entries:
-                st.warning("No artist/tag entries were found. Make sure each line contains an @ handle or SoundCloud link.")
+        if submitted:
+            if not artist_name.strip():
+                st.error("Please enter an artist name.")
             else:
-                count = append_to_artist_database(
-                    parsed_entries,
-                    dj_name=dj_name,
-                    set_name=set_name,
-                    artist_location=artist_location,
+                entry = {
+                    "artist_name": artist_name.strip(),
+                    "handle": artist_handle.strip(),
+                    "url": artist_url.strip(),
+                    "track_title": track_title.strip(),
+                    "source_text": f"{artist_name.strip()} - {track_title.strip()}",
+                    "notes": "",
+                }
+                append_to_artist_database(
+                    [entry],
+                    dj_name=radio_show,
+                    set_name=f"Set {set_number.strip()} - {entry_date.strip()}".strip(" -"),
+                    artist_location=artist_location.strip(),
                 )
-                st.success(f"✅ Saved **{count}** entries to the artist database.")
+                st.success("✅ Saved the entry to the database.")
                 st.dataframe(load_artist_database(), use_container_width=True, hide_index=True)
 
     st.markdown("---")
