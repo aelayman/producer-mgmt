@@ -100,7 +100,7 @@ def get_db_connection() -> sqlite3.Connection:
 
 
 def init_artist_database() -> None:
-    """Create the artist database tables if they do not already exist."""
+    """Create the artist database tables if they do not already exist and add missing columns for older databases."""
     with get_db_connection() as conn:
         conn.execute(
             """
@@ -123,6 +123,15 @@ def init_artist_database() -> None:
             )
             """
         )
+
+        existing_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(artist_appearances)").fetchall()
+        }
+        for column_name in ["origin_country", "origin_city"]:
+            if column_name not in existing_columns:
+                conn.execute(f"ALTER TABLE artist_appearances ADD COLUMN {column_name} TEXT")
+
+        conn.commit()
 
 
 def append_unique_value(existing: str | None, new_value: str) -> str:
