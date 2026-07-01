@@ -115,6 +115,8 @@ def init_artist_database() -> None:
                 set_names TEXT,
                 source_texts TEXT,
                 notes TEXT,
+                origin_country TEXT,
+                origin_city TEXT,
                 first_seen TEXT,
                 last_seen TEXT,
                 UNIQUE(artist_name, track_title)
@@ -141,7 +143,8 @@ def load_artist_database() -> list[dict]:
         rows = conn.execute(
             """
             SELECT artist_name, handle, url, track_title, appearance_count, dj_names,
-                   set_names, source_texts, notes, first_seen, last_seen
+                   set_names, source_texts, notes, origin_country, origin_city,
+                   first_seen, last_seen
             FROM artist_appearances
             ORDER BY artist_name, track_title
             """
@@ -149,7 +152,13 @@ def load_artist_database() -> list[dict]:
         return [dict(row) for row in rows]
 
 
-def append_to_artist_database(entries: list[dict], dj_name: str = "", set_name: str = "") -> int:
+def append_to_artist_database(
+    entries: list[dict],
+    dj_name: str = "",
+    set_name: str = "",
+    origin_country: str = "",
+    origin_city: str = "",
+) -> int:
     """Upsert parsed artist/tag entries into the SQLite artist database."""
     if not entries:
         return 0
@@ -167,7 +176,7 @@ def append_to_artist_database(entries: list[dict], dj_name: str = "", set_name: 
             notes = (entry.get("notes") or "").strip()
 
             existing = conn.execute(
-                "SELECT id, appearance_count, dj_names, set_names, source_texts, notes FROM artist_appearances WHERE artist_name = ? AND track_title = ?",
+                "SELECT id, appearance_count, dj_names, set_names, source_texts, notes, origin_country, origin_city FROM artist_appearances WHERE artist_name = ? AND track_title = ?",
                 (artist_name, track_title),
             ).fetchone()
 
@@ -177,22 +186,36 @@ def append_to_artist_database(entries: list[dict], dj_name: str = "", set_name: 
                 set_names = append_unique_value(existing["set_names"], set_name)
                 source_texts = append_unique_value(existing["source_texts"], source_text)
                 notes_value = append_unique_value(existing["notes"], notes) if notes else existing["notes"] or ""
+                updated_country = existing["origin_country"] or origin_country
+                updated_city = existing["origin_city"] or origin_city
                 conn.execute(
                     """
                     UPDATE artist_appearances
                     SET handle = ?, url = ?, appearance_count = ?, dj_names = ?, set_names = ?,
-                        source_texts = ?, notes = ?, last_seen = ?
+                        source_texts = ?, notes = ?, origin_country = ?, origin_city = ?, last_seen = ?
                     WHERE id = ?
                     """,
-                    (handle, url, appearance_count, dj_names, set_names, source_texts, notes_value, now, existing["id"]),
+                    (
+                        handle,
+                        url,
+                        appearance_count,
+                        dj_names,
+                        set_names,
+                        source_texts,
+                        notes_value,
+                        updated_country,
+                        updated_city,
+                        now,
+                        existing["id"],
+                    ),
                 )
             else:
                 conn.execute(
                     """
                     INSERT INTO artist_appearances (
                         artist_name, handle, url, track_title, appearance_count, dj_names,
-                        set_names, source_texts, notes, first_seen, last_seen
-                    ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+                        set_names, source_texts, notes, origin_country, origin_city, first_seen, last_seen
+                    ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         artist_name,
@@ -203,6 +226,8 @@ def append_to_artist_database(entries: list[dict], dj_name: str = "", set_name: 
                         set_name or "",
                         source_text or "",
                         notes or "",
+                        origin_country or "",
+                        origin_city or "",
                         now,
                         now,
                     ),
@@ -228,6 +253,8 @@ def export_artist_database_csv() -> str:
             "set_names",
             "source_texts",
             "notes",
+            "origin_country",
+            "origin_city",
             "first_seen",
             "last_seen",
         ],
@@ -683,6 +710,8 @@ with tab_database:
     )
     dj_name = st.text_input("DJ who played this set", value="", key="dj_name")
     set_name = st.text_input("Set / date / notes", value="", key="set_name")
+    origin_country = st.text_input("Artist origin country (optional)", value="", key="origin_country")
+    origin_city = st.text_input("Artist origin city (optional)", value="", key="origin_city")
 
     if db_upload:
         db_text = db_upload.read().decode("utf-8", errors="replace")
@@ -699,7 +728,13 @@ with tab_database:
             if not parsed_entries:
                 st.warning("No artist/tag entries were found. Make sure each line contains an @ handle or SoundCloud link.")
             else:
-                count = append_to_artist_database(parsed_entries, dj_name=dj_name, set_name=set_name)
+                count = append_to_artist_database(
+                    parsed_entries,
+                    dj_name=dj_name,
+                    set_name=set_name,
+                    origin_country=origin_country,
+                    origin_city=origin_city,
+                )
                 st.success(f"✅ Saved **{count}** entries to the artist database.")
                 st.dataframe(load_artist_database(), use_container_width=True, hide_index=True)
 
