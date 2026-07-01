@@ -1,0 +1,29 @@
+# =============================================================================
+# MASTER REFERENCE LIST
+# =============================================================================
+# This is your persistent, growing list of people and their @ handles.
+# The app reads from this file automatically every time it runs.
+#
+# FORMAT — one entry per line:
+#   Name @handle – optional description/context
+#
+# EXAMPLES:
+#   Fred Jones @fredejones – Dynamics presentation
+#   Jane Smith @jsmith – Power Platform demo
+#   Bob Roberts @broberts – Finance overview
+#
+# RULES:
+#   - Each line must contain exactly one @ handle
+#   - The name goes BEFORE the @ handle
+#   - Anything after the @ handle is optional context (ignored during matching)
+#   - Lines starting with # are comments (ignored)
+#   - Blank lines are ignored
+#   - Numbering is optional (e.g. "28. Fred Jones @fred" works too)
+#   - You can add new entries by editing this file directly,
+#     or by using the "Manage Master List" tab in the web UI
+#
+# TO ADD NEW ENTRIES:
+#   Option 1: Open this file in any text editor and add lines at the bottom
+#   Option 2: Use the "Manage Master List" tab in the app's web UI
+# =============================================================================
+
