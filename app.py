@@ -37,7 +37,7 @@ ADJUSTING THE MATCHING:
 import csv
 import re
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime
 from io import StringIO
 from pathlib import Path
 import streamlit as st
@@ -737,50 +737,76 @@ with tab_database:
         "Paste one or more SoundCloud-style lines and save them as structured rows with artist name, handle, and full URL."
     )
 
-    st.markdown("#### Add one track entry at a time")
-    st.caption("Enter a single artist/track entry, along with the set number, date, and the radio show.")
+    st.markdown("#### Paste your SoundCloud-style lines")
+    st.caption("Paste one or more lines like the examples you shared. Each line will be imported as one track entry using the same DJ, set, date, and show context below.")
 
-    with st.form("single_entry_form"):
-        dj_name = st.text_input("DJ name", value="", key="dj_name")
-        set_number = st.text_input("Set number", value="", key="set_number")
-        entry_date = st.text_input("Date", value="", key="entry_date")
-        radio_show = st.radio(
-            "Radio show",
-            ["NO SIGNAL", "ABYSS"],
-            index=0,
-            key="radio_show",
-        )
-        artist_name = st.text_input("Artist name", value="", key="artist_name")
-        track_title = st.text_input("Track title", value="", key="track_title")
-        artist_handle = st.text_input("SoundCloud handle (optional)", value="", key="artist_handle")
-        artist_url = st.text_input("SoundCloud URL (optional)", value="", key="artist_url")
-        artist_location = st.text_input("Artist location (city/country/general location, optional)", value="", key="artist_location")
-        submitted = st.form_submit_button("💾 Save entry")
+    for key, default in {
+        "dj_name": "",
+        "set_number": "",
+        "entry_date": date.today(),
+        "radio_show": "NO SIGNAL",
+        "artist_location": "",
+        "bulk_lines": "",
+    }.items():
+        st.session_state.setdefault(key, default)
 
-        if submitted:
-            if not artist_name.strip():
-                st.error("Please enter an artist name.")
-            elif not dj_name.strip():
-                st.error("Please enter a DJ name.")
+    with st.container():
+        import_col, clear_col = st.columns(2)
+        paste_import = import_col.button("📥 Paste and import", use_container_width=True, type="primary")
+        clear = clear_col.button("🧹 Clear input", use_container_width=True)
+
+        if clear:
+            st.session_state["bulk_lines"] = ""
+            st.session_state["dj_name"] = ""
+            st.session_state["set_number"] = ""
+            st.session_state["entry_date"] = date.today()
+            st.session_state["radio_show"] = "NO SIGNAL"
+            st.session_state["artist_location"] = ""
+            st.rerun()
+
+    dj_name = st.text_input("DJ name", key="dj_name")
+    set_number = st.text_input("Set number", key="set_number")
+    entry_date = st.date_input("Date", key="entry_date", format="YYYY-MM-DD")
+    radio_show = st.radio(
+        "Radio show",
+        ["NO SIGNAL", "ABYSS"],
+        key="radio_show",
+    )
+    artist_location = st.text_input("Artist location (optional, applies to all imported rows)", key="artist_location")
+    pasted_lines = st.text_area(
+        "Paste lines here",
+        key="bulk_lines",
+        height=260,
+        placeholder="1. Mor Elian @[morelian](https://soundcloud.com/morelian) - Swerving Mantis\n2. Gobekli @[gobekli](https://soundcloud.com/gobekli) - Edfu Texts (Ronan Remix) @[ronan-music](https://soundcloud.com/ronan-music)",
+    )
+
+    if paste_import:
+        if not dj_name.strip():
+            st.error("Please enter a DJ name.")
+        else:
+            lines = [line.strip() for line in pasted_lines.splitlines() if line.strip()]
+            if not lines:
+                st.error("Paste at least one line to import.")
             else:
-                entry = {
-                    "artist_name": artist_name.strip(),
-                    "handle": artist_handle.strip(),
-                    "url": artist_url.strip(),
-                    "track_title": track_title.strip(),
-                    "source_text": f"{artist_name.strip()} - {track_title.strip()}",
-                    "notes": "",
-                }
-                append_to_artist_database(
-                    [entry],
-                    dj_name=dj_name.strip(),
-                    set_number=set_number.strip(),
-                    set_date=entry_date.strip(),
-                    radio_show=radio_show,
-                    artist_location=artist_location.strip(),
-                )
-                st.success("✅ Saved the entry to the database.")
-                st.dataframe(load_artist_database(), use_container_width=True, hide_index=True)
+                imported_count = 0
+                for line in lines:
+                    parsed_entries = parse_soundcloud_line(line)
+                    if parsed_entries:
+                        imported_count += append_to_artist_database(
+                            parsed_entries,
+                            dj_name=dj_name.strip(),
+                            set_number=set_number.strip(),
+                            set_date=entry_date.isoformat() if isinstance(entry_date, date) else str(entry_date),
+                            radio_show=radio_show,
+                            artist_location=artist_location.strip(),
+                        )
+
+                if imported_count:
+                    st.session_state["bulk_lines"] = ""
+                    st.success(f"✅ Imported {imported_count} line(s) into the database.")
+                    st.dataframe(load_artist_database(), use_container_width=True, hide_index=True)
+                else:
+                    st.warning("No valid entries were found in the pasted text.")
 
     st.markdown("---")
     st.caption(f"Database file: {ARTIST_DATABASE_PATH}")
