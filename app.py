@@ -595,8 +595,8 @@ with st.sidebar:
     )
 
 
-# --- THREE TABS: main matching function, artist database import, and master list management ---
-tab_match, tab_database, tab_manage = st.tabs(["🔍 Find Tags", "🎵 Build Artist Database", "📋 Manage Master List"])
+# --- FOUR TABS: main matching function, artist database import, database explorer, and master list management ---
+tab_match, tab_database, tab_explore, tab_manage = st.tabs(["🔍 Find Tags", "🎵 Build Artist Database", "🧭 Explore Database", "📋 Manage Master List"])
 
 
 # =============================================================================
@@ -750,7 +750,94 @@ with tab_database:
 
 
 # =============================================================================
-# TAB 3: MANAGE MASTER LIST
+# TAB 3: EXPLORE ARTIST DATABASE
+# Lets the user search and summarize artists by country, city, DJ, and appearance.
+# =============================================================================
+with tab_explore:
+    st.subheader("Explore your artist database")
+    st.markdown("Search, filter, and summarize the artists you have imported so far.")
+
+    artist_rows = load_artist_database()
+    if not artist_rows:
+        st.info("No artists have been imported yet. Use the Build Artist Database tab to add your first batch.")
+    else:
+        search_term = st.text_input("Search by artist, track, DJ, country, or city", key="artist_search")
+        filtered_rows = []
+        for row in artist_rows:
+            haystack = " ".join(
+                [
+                    row.get("artist_name", ""),
+                    row.get("track_title", ""),
+                    row.get("dj_names", ""),
+                    row.get("set_names", ""),
+                    row.get("origin_country", ""),
+                    row.get("origin_city", ""),
+                ]
+            ).lower()
+            if not search_term or search_term.lower() in haystack:
+                filtered_rows.append(row)
+
+        if filtered_rows:
+            st.dataframe(
+                [
+                    {
+                        "Artist": row.get("artist_name", ""),
+                        "Track": row.get("track_title", ""),
+                        "Handle": row.get("handle", ""),
+                        "URL": row.get("url", ""),
+                        "Appearances": row.get("appearance_count", 0),
+                        "Country": row.get("origin_country", ""),
+                        "City": row.get("origin_city", ""),
+                        "DJs": row.get("dj_names", ""),
+                        "Sets": row.get("set_names", ""),
+                    }
+                    for row in filtered_rows
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.markdown("---")
+            summary_cols = st.columns(4)
+            summary_cols[0].metric("Total artist/track rows", len(filtered_rows))
+            summary_cols[1].metric(
+                "Artists with country",
+                sum(1 for row in filtered_rows if row.get("origin_country", "")),
+            )
+            summary_cols[2].metric(
+                "Artists with city",
+                sum(1 for row in filtered_rows if row.get("origin_city", "")),
+            )
+            summary_cols[3].metric(
+                "Most repeated",
+                max((row.get("appearance_count", 0) for row in filtered_rows), default=0),
+            )
+
+            st.markdown("#### Geography summary")
+            country_counts = {}
+            city_counts = {}
+            for row in filtered_rows:
+                country = (row.get("origin_country") or "Unknown").strip()
+                city = (row.get("origin_city") or "Unknown").strip()
+                country_counts[country] = country_counts.get(country, 0) + 1
+                city_counts[city] = city_counts.get(city, 0) + 1
+
+            country_summary = sorted(country_counts.items(), key=lambda item: (-item[1], item[0]))
+            city_summary = sorted(city_counts.items(), key=lambda item: (-item[1], item[0]))
+
+            col_country, col_city = st.columns(2)
+            with col_country:
+                st.write("**Countries**")
+                for country, count in country_summary[:15]:
+                    st.write(f"- {country}: {count}")
+            with col_city:
+                st.write("**Cities**")
+                for city, count in city_summary[:15]:
+                    st.write(f"- {city}: {count}")
+
+
+# =============================================================================
+# TAB 4: MANAGE MASTER LIST
 # Lets the user view the current master list, add new entries, or bulk-paste
 # a whole new batch. Changes are saved to master_reference_list.txt.
 # =============================================================================
