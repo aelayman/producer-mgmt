@@ -99,53 +99,6 @@ def get_db_connection() -> sqlite3.Connection:
     return conn
 
 
-def init_artist_database() -> None:
-    """Create the artist database tables if they do not already exist and add missing columns for older databases."""
-    with get_db_connection() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS artist_appearances (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                artist_name TEXT NOT NULL,
-                handle TEXT,
-                url TEXT,
-                track_title TEXT,
-                appearance_count INTEGER NOT NULL DEFAULT 1,
-                dj_names TEXT,
-                set_names TEXT,
-                source_texts TEXT,
-                notes TEXT,
-                artist_location TEXT,
-                origin_country TEXT,
-                origin_city TEXT,
-                first_seen TEXT,
-                last_seen TEXT,
-                UNIQUE(artist_name, track_title)
-            )
-            """
-        )
-
-        existing_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(artist_appearances)").fetchall()
-        }
-        for column_name in ["artist_location", "origin_country", "origin_city"]:
-            if column_name not in existing_columns:
-                conn.execute(f"ALTER TABLE artist_appearances ADD COLUMN {column_name} TEXT")
-
-        conn.commit()
-
-
-def append_unique_value(existing: str | None, new_value: str) -> str:
-    """Append a value to a semicolon-separated list without duplicates."""
-    if not new_value:
-        return existing or ""
-
-    values = [item.strip() for item in (existing or "").split(";") if item.strip()]
-    if new_value.strip() not in values:
-        values.append(new_value.strip())
-    return "; ".join(values)
-
-
 def clean_text(value: object) -> str:
     """Convert database values to strings and treat None as empty text."""
     if value is None:
@@ -153,29 +106,131 @@ def clean_text(value: object) -> str:
     return str(value)
 
 
-def get_row_location(row: dict) -> str:
-    """Return a display-friendly artist location from either the dedicated field or legacy country/city values."""
-    artist_location = clean_text(row.get("artist_location", "")).strip()
-    if artist_location:
-        return artist_location
+def init_artist_database() -> None:
+    """Create the hierarchical artist database tables if they do not already exist."""
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS djs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dj_name TEXT NOT NULL UNIQUE
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dj_id INTEGER NOT NULL,
+                set_number TEXT NOT NULL,
+                set_date TEXT,
+                radio_show TEXT NOT NULL DEFAULT 'NO SIGNAL',
+                UNIQUE(dj_id, set_number, set_date, radio_show)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS artists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                artist_name TEXT NOT NULL UNIQUE,
+                handle TEXT,
+                url TEXT,
+                location TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tracks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                set_id INTEGER NOT NULL,
+                artist_id INTEGER NOT NULL,
+                track_title TEXT NOT NULL,
+                source_text TEXT,
+                notes TEXT,
+                first_seen TEXT,
+                last_seen TEXT
+            )
+            """
+        )
+        conn.commit()
 
-    country = clean_text(row.get("origin_country", "")).strip()
-    city = clean_text(row.get("origin_city", "")).strip()
-    parts = [part for part in [city, country] if part]
-    return ", ".join(parts)
+
+def get_or_create_dj(conn: sqlite3.Connection, dj_name: str) -> int:
+    dj_name = clean_text(dj_name).strip() or "Unknown DJ"
+    existing = conn.execute("SELECT id FROM djs WHERE dj_name = ?", (dj_name,)).fetchone()
+    if existing:
+        return existing["id"]
+    cursor = conn.execute("INSERT INTO djs (dj_name) VALUES (?)", (dj_name,))
+    return int(cursor.lastrowid)
+
+
+def get_or_create_set(conn: sqlite3.Connection, dj_name: str, set_number: str, set_date: str, radio_show: str) -> int:
+    dj_id = get_or_create_dj(conn, dj_name)
+    set_number = clean_text(set_number).strip() or "1"
+    set_date = clean_text(set_date).strip()
+    radio_show = clean_text(radio_show).strip() or "NO SIGNAL"
+    existing = conn.execute(
+        "SELECT id FROM sets WHERE dj_id = ? AND set_number = ? AND set_date = ? AND radio_show = ?",
+        (dj_id, set_number, set_date, radio_show),
+    ).fetchone()
+    if existing:
+        return existing["id"]
+    cursor = conn.execute(
+        "INSERT INTO sets (dj_id, set_number, set_date, radio_show) VALUES (?, ?, ?, ?)",
+        (dj_id, set_number, set_date, radio_show),
+    )
+    return int(cursor.lastrowid)
+
+
+def get_or_create_artist(conn: sqlite3.Connection, artist_name: str, handle: str = "", url: str = "", location: str = "") -> int:
+    artist_name = clean_text(artist_name).strip() or "Unknown artist"
+    handle = clean_text(handle).strip()
+    url = clean_text(url).strip()
+    location = clean_text(location).strip()
+    existing = conn.execute("SELECT id, handle, url, location FROM artists WHERE artist_name = ?", (artist_name,)).fetchone()
+    if existing:
+        if not existing["handle"] and handle:
+            conn.execute("UPDATE artists SET handle = ? WHERE id = ?", (handle, existing["id"]))
+        if not existing["url"] and url:
+            conn.execute("UPDATE artists SET url = ? WHERE id = ?", (url, existing["id"]))
+        if not existing["location"] and location:
+            conn.execute("UPDATE artists SET location = ? WHERE id = ?", (location, existing["id"]))
+        return existing["id"]
+    cursor = conn.execute(
+        "INSERT INTO artists (artist_name, handle, url, location) VALUES (?, ?, ?, ?)",
+        (artist_name, handle, url, location),
+    )
+    return int(cursor.lastrowid)
 
 
 def load_artist_database() -> list[dict]:
-    """Load the artist database from SQLite."""
+    """Load the artist database from SQLite as one row per track appearance."""
     init_artist_database()
     with get_db_connection() as conn:
         rows = conn.execute(
             """
-            SELECT artist_name, handle, url, track_title, appearance_count, dj_names,
-                   set_names, source_texts, notes, artist_location, origin_country, origin_city,
-                   first_seen, last_seen
-            FROM artist_appearances
-            ORDER BY artist_name, track_title
+            SELECT
+                a.artist_name,
+                a.handle,
+                a.url,
+                a.location,
+                t.track_title,
+                t.source_text,
+                t.notes,
+                d.dj_name,
+                s.set_number,
+                s.set_date,
+                s.radio_show,
+                (SELECT COUNT(*) FROM tracks t2 WHERE t2.artist_id = a.id) AS appearance_count,
+                t.first_seen,
+                t.last_seen
+            FROM tracks t
+            JOIN artists a ON a.id = t.artist_id
+            JOIN sets s ON s.id = t.set_id
+            JOIN djs d ON d.id = s.dj_id
+            ORDER BY a.artist_name, s.set_date, s.set_number, t.track_title
             """
         ).fetchall()
         return [dict(row) for row in rows]
@@ -184,10 +239,12 @@ def load_artist_database() -> list[dict]:
 def append_to_artist_database(
     entries: list[dict],
     dj_name: str = "",
-    set_name: str = "",
+    set_number: str = "",
+    set_date: str = "",
+    radio_show: str = "NO SIGNAL",
     artist_location: str = "",
 ) -> int:
-    """Upsert parsed artist/tag entries into the SQLite artist database."""
+    """Create or update DJ/set/artist/track records for one or more entries."""
     if not entries:
         return 0
 
@@ -195,6 +252,7 @@ def append_to_artist_database(
     now = datetime.utcnow().isoformat()
 
     with get_db_connection() as conn:
+        set_id = get_or_create_set(conn, dj_name, set_number, set_date, radio_show)
         for entry in entries:
             artist_name = (entry.get("artist_name") or "Unknown artist").strip()
             track_title = (entry.get("track_title") or "").strip()
@@ -202,67 +260,16 @@ def append_to_artist_database(
             url = (entry.get("url") or "").strip()
             source_text = (entry.get("source_text") or "").strip()
             notes = (entry.get("notes") or "").strip()
+            location = clean_text(artist_location).strip()
 
-            existing = conn.execute(
-                "SELECT id, appearance_count, dj_names, set_names, source_texts, notes, artist_location, origin_country, origin_city FROM artist_appearances WHERE artist_name = ? AND track_title = ?",
-                (artist_name, track_title),
-            ).fetchone()
-
-            if existing:
-                appearance_count = existing["appearance_count"] + 1
-                dj_names = append_unique_value(existing["dj_names"], dj_name)
-                set_names = append_unique_value(existing["set_names"], set_name)
-                source_texts = append_unique_value(existing["source_texts"], source_text)
-                notes_value = append_unique_value(existing["notes"], notes) if notes else existing["notes"] or ""
-                updated_location = existing["artist_location"] or artist_location
-                updated_country = existing["origin_country"] or ""
-                updated_city = existing["origin_city"] or ""
-                conn.execute(
-                    """
-                    UPDATE artist_appearances
-                    SET handle = ?, url = ?, appearance_count = ?, dj_names = ?, set_names = ?,
-                        source_texts = ?, notes = ?, artist_location = ?, origin_country = ?, origin_city = ?, last_seen = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        handle,
-                        url,
-                        appearance_count,
-                        dj_names,
-                        set_names,
-                        source_texts,
-                        notes_value,
-                        updated_location,
-                        updated_country,
-                        updated_city,
-                        now,
-                        existing["id"],
-                    ),
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO artist_appearances (
-                        artist_name, handle, url, track_title, appearance_count, dj_names,
-                        set_names, source_texts, notes, artist_location, origin_country, origin_city, first_seen, last_seen
-                    ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        artist_name,
-                        handle,
-                        url,
-                        track_title,
-                        dj_name or "",
-                        set_name or "",
-                        source_text or "",
-                        notes or "",
-                        artist_location or "",
-                        "",
-                        "",
-                        now,
-                        now,
-                    ),
-                )
+            artist_id = get_or_create_artist(conn, artist_name, handle=handle, url=url, location=location)
+            conn.execute(
+                """
+                INSERT INTO tracks (set_id, artist_id, track_title, source_text, notes, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (set_id, artist_id, track_title or artist_name, source_text, notes, now, now),
+            )
 
         conn.commit()
     return len(entries)
@@ -278,15 +285,15 @@ def export_artist_database_csv() -> str:
             "artist_name",
             "handle",
             "url",
+            "location",
             "track_title",
             "appearance_count",
-            "dj_names",
-            "set_names",
-            "source_texts",
+            "dj_name",
+            "set_number",
+            "set_date",
+            "radio_show",
+            "source_text",
             "notes",
-            "artist_location",
-            "origin_country",
-            "origin_city",
             "first_seen",
             "last_seen",
         ],
@@ -734,24 +741,27 @@ with tab_database:
     st.caption("Enter a single artist/track entry, along with the set number, date, and the radio show.")
 
     with st.form("single_entry_form"):
+        dj_name = st.text_input("DJ name", value="", key="dj_name")
         set_number = st.text_input("Set number", value="", key="set_number")
-        artist_name = st.text_input("Artist name", value="", key="artist_name")
-        track_title = st.text_input("Track title", value="", key="track_title")
-        artist_handle = st.text_input("SoundCloud handle (optional)", value="", key="artist_handle")
-        artist_url = st.text_input("SoundCloud URL (optional)", value="", key="artist_url")
         entry_date = st.text_input("Date", value="", key="entry_date")
-        artist_location = st.text_input("Artist location (city/country/general location, optional)", value="", key="artist_location")
         radio_show = st.radio(
             "Radio show",
             ["NO SIGNAL", "ABYSS"],
             index=0,
             key="radio_show",
         )
+        artist_name = st.text_input("Artist name", value="", key="artist_name")
+        track_title = st.text_input("Track title", value="", key="track_title")
+        artist_handle = st.text_input("SoundCloud handle (optional)", value="", key="artist_handle")
+        artist_url = st.text_input("SoundCloud URL (optional)", value="", key="artist_url")
+        artist_location = st.text_input("Artist location (city/country/general location, optional)", value="", key="artist_location")
         submitted = st.form_submit_button("💾 Save entry")
 
         if submitted:
             if not artist_name.strip():
                 st.error("Please enter an artist name.")
+            elif not dj_name.strip():
+                st.error("Please enter a DJ name.")
             else:
                 entry = {
                     "artist_name": artist_name.strip(),
@@ -763,8 +773,10 @@ with tab_database:
                 }
                 append_to_artist_database(
                     [entry],
-                    dj_name=radio_show,
-                    set_name=f"Set {set_number.strip()} - {entry_date.strip()}".strip(" -"),
+                    dj_name=dj_name.strip(),
+                    set_number=set_number.strip(),
+                    set_date=entry_date.strip(),
+                    radio_show=radio_show,
                     artist_location=artist_location.strip(),
                 )
                 st.success("✅ Saved the entry to the database.")
@@ -800,11 +812,11 @@ with tab_explore:
                 [
                     clean_text(row.get("artist_name", "")),
                     clean_text(row.get("track_title", "")),
-                    clean_text(row.get("dj_names", "")),
-                    clean_text(row.get("set_names", "")),
-                    clean_text(row.get("artist_location", "")),
-                    clean_text(row.get("origin_country", "")),
-                    clean_text(row.get("origin_city", "")),
+                    clean_text(row.get("dj_name", "")),
+                    clean_text(row.get("set_number", "")),
+                    clean_text(row.get("set_date", "")),
+                    clean_text(row.get("radio_show", "")),
+                    clean_text(row.get("location", "")),
                 ]
             ).lower()
             if not search_term or search_term.lower() in haystack:
@@ -818,10 +830,12 @@ with tab_explore:
                         "Track": clean_text(row.get("track_title", "")),
                         "Handle": clean_text(row.get("handle", "")),
                         "URL": clean_text(row.get("url", "")),
+                        "Location": clean_text(row.get("location", "")),
                         "Appearances": row.get("appearance_count", 0),
-                        "Location": get_row_location(row),
-                        "DJs": clean_text(row.get("dj_names", "")),
-                        "Sets": clean_text(row.get("set_names", "")),
+                        "DJ": clean_text(row.get("dj_name", "")),
+                        "Set": clean_text(row.get("set_number", "")),
+                        "Date": clean_text(row.get("set_date", "")),
+                        "Show": clean_text(row.get("radio_show", "")),
                     }
                     for row in filtered_rows
                 ],
@@ -831,40 +845,33 @@ with tab_explore:
 
             st.markdown("---")
             summary_cols = st.columns(4)
-            summary_cols[0].metric("Total artist/track rows", len(filtered_rows))
+            summary_cols[0].metric("Total track entries", len(filtered_rows))
             summary_cols[1].metric(
-                "Artists with country",
-                sum(1 for row in filtered_rows if get_row_location(row)),
+                "Artists with location",
+                sum(1 for row in filtered_rows if clean_text(row.get("location", ""))),
             )
             summary_cols[2].metric(
-                "Artists with city",
-                sum(1 for row in filtered_rows if clean_text(row.get("origin_city", ""))),
+                "Unique DJs",
+                len({clean_text(row.get("dj_name", "")) for row in filtered_rows if clean_text(row.get("dj_name", ""))}),
             )
             summary_cols[3].metric(
                 "Most repeated",
                 max((row.get("appearance_count", 0) for row in filtered_rows), default=0),
             )
 
-            st.markdown("#### Geography summary")
-            country_counts = {}
-            city_counts = {}
+            st.markdown("#### Location summary")
+            location_counts = {}
             for row in filtered_rows:
-                location = get_row_location(row) or "Unknown"
-                country_counts[country] = country_counts.get(country, 0) + 1
-                city_counts[city] = city_counts.get(city, 0) + 1
+                location = clean_text(row.get("location", "")) or "Unknown"
+                location_counts[location] = location_counts.get(location, 0) + 1
 
-            country_summary = sorted(country_counts.items(), key=lambda item: (-item[1], item[0]))
-            city_summary = sorted(city_counts.items(), key=lambda item: (-item[1], item[0]))
+            location_summary = sorted(location_counts.items(), key=lambda item: (-item[1], item[0]))
 
-            col_country, col_city = st.columns(2)
-            with col_country:
-                st.write("**Countries**")
-                for country, count in country_summary[:15]:
-                    st.write(f"- {country}: {count}")
-            with col_city:
-                st.write("**Cities**")
-                for city, count in city_summary[:15]:
-                    st.write(f"- {city}: {count}")
+            col_location = st.columns(1)[0]
+            with col_location:
+                st.write("**Locations**")
+                for location, count in location_summary[:20]:
+                    st.write(f"- {location}: {count}")
 
 
 # =============================================================================
