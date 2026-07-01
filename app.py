@@ -145,6 +145,13 @@ def append_unique_value(existing: str | None, new_value: str) -> str:
     return "; ".join(values)
 
 
+def clean_text(value: object) -> str:
+    """Convert database values to strings and treat None as empty text."""
+    if value is None:
+        return ""
+    return str(value)
+
+
 def load_artist_database() -> list[dict]:
     """Load the artist database from SQLite."""
     init_artist_database()
@@ -775,12 +782,12 @@ with tab_explore:
         for row in artist_rows:
             haystack = " ".join(
                 [
-                    row.get("artist_name", ""),
-                    row.get("track_title", ""),
-                    row.get("dj_names", ""),
-                    row.get("set_names", ""),
-                    row.get("origin_country", ""),
-                    row.get("origin_city", ""),
+                    clean_text(row.get("artist_name", "")),
+                    clean_text(row.get("track_title", "")),
+                    clean_text(row.get("dj_names", "")),
+                    clean_text(row.get("set_names", "")),
+                    clean_text(row.get("origin_country", "")),
+                    clean_text(row.get("origin_city", "")),
                 ]
             ).lower()
             if not search_term or search_term.lower() in haystack:
@@ -790,15 +797,15 @@ with tab_explore:
             st.dataframe(
                 [
                     {
-                        "Artist": row.get("artist_name", ""),
-                        "Track": row.get("track_title", ""),
-                        "Handle": row.get("handle", ""),
-                        "URL": row.get("url", ""),
+                        "Artist": clean_text(row.get("artist_name", "")),
+                        "Track": clean_text(row.get("track_title", "")),
+                        "Handle": clean_text(row.get("handle", "")),
+                        "URL": clean_text(row.get("url", "")),
                         "Appearances": row.get("appearance_count", 0),
-                        "Country": row.get("origin_country", ""),
-                        "City": row.get("origin_city", ""),
-                        "DJs": row.get("dj_names", ""),
-                        "Sets": row.get("set_names", ""),
+                        "Country": clean_text(row.get("origin_country", "")),
+                        "City": clean_text(row.get("origin_city", "")),
+                        "DJs": clean_text(row.get("dj_names", "")),
+                        "Sets": clean_text(row.get("set_names", "")),
                     }
                     for row in filtered_rows
                 ],
@@ -811,11 +818,11 @@ with tab_explore:
             summary_cols[0].metric("Total artist/track rows", len(filtered_rows))
             summary_cols[1].metric(
                 "Artists with country",
-                sum(1 for row in filtered_rows if row.get("origin_country", "")),
+                sum(1 for row in filtered_rows if clean_text(row.get("origin_country", ""))),
             )
             summary_cols[2].metric(
                 "Artists with city",
-                sum(1 for row in filtered_rows if row.get("origin_city", "")),
+                sum(1 for row in filtered_rows if clean_text(row.get("origin_city", ""))),
             )
             summary_cols[3].metric(
                 "Most repeated",
@@ -826,8 +833,8 @@ with tab_explore:
             country_counts = {}
             city_counts = {}
             for row in filtered_rows:
-                country = (row.get("origin_country") or "Unknown").strip()
-                city = (row.get("origin_city") or "Unknown").strip()
+                country = clean_text(row.get("origin_country") or "Unknown").strip()
+                city = clean_text(row.get("origin_city") or "Unknown").strip()
                 country_counts[country] = country_counts.get(country, 0) + 1
                 city_counts[city] = city_counts.get(city, 0) + 1
 
