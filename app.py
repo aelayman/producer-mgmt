@@ -115,6 +115,7 @@ def init_artist_database() -> None:
                 set_names TEXT,
                 source_texts TEXT,
                 notes TEXT,
+                artist_location TEXT,
                 origin_country TEXT,
                 origin_city TEXT,
                 first_seen TEXT,
@@ -127,7 +128,7 @@ def init_artist_database() -> None:
         existing_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(artist_appearances)").fetchall()
         }
-        for column_name in ["origin_country", "origin_city"]:
+        for column_name in ["artist_location", "origin_country", "origin_city"]:
             if column_name not in existing_columns:
                 conn.execute(f"ALTER TABLE artist_appearances ADD COLUMN {column_name} TEXT")
 
@@ -152,6 +153,18 @@ def clean_text(value: object) -> str:
     return str(value)
 
 
+def get_row_location(row: dict) -> str:
+    """Return a display-friendly artist location from either the dedicated field or legacy country/city values."""
+    artist_location = clean_text(row.get("artist_location", "")).strip()
+    if artist_location:
+        return artist_location
+
+    country = clean_text(row.get("origin_country", "")).strip()
+    city = clean_text(row.get("origin_city", "")).strip()
+    parts = [part for part in [city, country] if part]
+    return ", ".join(parts)
+
+
 def load_artist_database() -> list[dict]:
     """Load the artist database from SQLite."""
     init_artist_database()
@@ -159,7 +172,7 @@ def load_artist_database() -> list[dict]:
         rows = conn.execute(
             """
             SELECT artist_name, handle, url, track_title, appearance_count, dj_names,
-                   set_names, source_texts, notes, origin_country, origin_city,
+                   set_names, source_texts, notes, artist_location, origin_country, origin_city,
                    first_seen, last_seen
             FROM artist_appearances
             ORDER BY artist_name, track_title
@@ -172,8 +185,7 @@ def append_to_artist_database(
     entries: list[dict],
     dj_name: str = "",
     set_name: str = "",
-    origin_country: str = "",
-    origin_city: str = "",
+    artist_location: str = "",
 ) -> int:
     """Upsert parsed artist/tag entries into the SQLite artist database."""
     if not entries:
@@ -192,7 +204,7 @@ def append_to_artist_database(
             notes = (entry.get("notes") or "").strip()
 
             existing = conn.execute(
-                "SELECT id, appearance_count, dj_names, set_names, source_texts, notes, origin_country, origin_city FROM artist_appearances WHERE artist_name = ? AND track_title = ?",
+                "SELECT id, appearance_count, dj_names, set_names, source_texts, notes, artist_location, origin_country, origin_city FROM artist_appearances WHERE artist_name = ? AND track_title = ?",
                 (artist_name, track_title),
             ).fetchone()
 
@@ -202,13 +214,14 @@ def append_to_artist_database(
                 set_names = append_unique_value(existing["set_names"], set_name)
                 source_texts = append_unique_value(existing["source_texts"], source_text)
                 notes_value = append_unique_value(existing["notes"], notes) if notes else existing["notes"] or ""
-                updated_country = existing["origin_country"] or origin_country
-                updated_city = existing["origin_city"] or origin_city
+                updated_location = existing["artist_location"] or artist_location
+                updated_country = existing["origin_country"] or ""
+                updated_city = existing["origin_city"] or ""
                 conn.execute(
                     """
                     UPDATE artist_appearances
                     SET handle = ?, url = ?, appearance_count = ?, dj_names = ?, set_names = ?,
-                        source_texts = ?, notes = ?, origin_country = ?, origin_city = ?, last_seen = ?
+                        source_texts = ?, notes = ?, artist_location = ?, origin_country = ?, origin_city = ?, last_seen = ?
                     WHERE id = ?
                     """,
                     (
@@ -219,6 +232,7 @@ def append_to_artist_database(
                         set_names,
                         source_texts,
                         notes_value,
+                        updated_location,
                         updated_country,
                         updated_city,
                         now,
@@ -230,8 +244,8 @@ def append_to_artist_database(
                     """
                     INSERT INTO artist_appearances (
                         artist_name, handle, url, track_title, appearance_count, dj_names,
-                        set_names, source_texts, notes, origin_country, origin_city, first_seen, last_seen
-                    ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+                        set_names, source_texts, notes, artist_location, origin_country, origin_city, first_seen, last_seen
+                    ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         artist_name,
@@ -242,8 +256,9 @@ def append_to_artist_database(
                         set_name or "",
                         source_text or "",
                         notes or "",
-                        origin_country or "",
-                        origin_city or "",
+                        artist_location or "",
+                        "",
+                        "",
                         now,
                         now,
                     ),
@@ -269,6 +284,7 @@ def export_artist_database_csv() -> str:
             "set_names",
             "source_texts",
             "notes",
+            "artist_location",
             "origin_country",
             "origin_city",
             "first_seen",
@@ -726,8 +742,7 @@ with tab_database:
     )
     dj_name = st.text_input("DJ who played this set", value="", key="dj_name")
     set_name = st.text_input("Set / date / notes", value="", key="set_name")
-    origin_country = st.text_input("Artist origin country (optional)", value="", key="origin_country")
-    origin_city = st.text_input("Artist origin city (optional)", value="", key="origin_city")
+    artist_location = st.text_input("Artist location (city/country/general location, optional)", value="", key="artist_location")
 
     if db_upload:
         db_text = db_upload.read().decode("utf-8", errors="replace")
@@ -748,8 +763,7 @@ with tab_database:
                     parsed_entries,
                     dj_name=dj_name,
                     set_name=set_name,
-                    origin_country=origin_country,
-                    origin_city=origin_city,
+                    artist_location=artist_location,
                 )
                 st.success(f"✅ Saved **{count}** entries to the artist database.")
                 st.dataframe(load_artist_database(), use_container_width=True, hide_index=True)
@@ -786,6 +800,7 @@ with tab_explore:
                     clean_text(row.get("track_title", "")),
                     clean_text(row.get("dj_names", "")),
                     clean_text(row.get("set_names", "")),
+                    clean_text(row.get("artist_location", "")),
                     clean_text(row.get("origin_country", "")),
                     clean_text(row.get("origin_city", "")),
                 ]
@@ -802,8 +817,7 @@ with tab_explore:
                         "Handle": clean_text(row.get("handle", "")),
                         "URL": clean_text(row.get("url", "")),
                         "Appearances": row.get("appearance_count", 0),
-                        "Country": clean_text(row.get("origin_country", "")),
-                        "City": clean_text(row.get("origin_city", "")),
+                        "Location": get_row_location(row),
                         "DJs": clean_text(row.get("dj_names", "")),
                         "Sets": clean_text(row.get("set_names", "")),
                     }
@@ -818,7 +832,7 @@ with tab_explore:
             summary_cols[0].metric("Total artist/track rows", len(filtered_rows))
             summary_cols[1].metric(
                 "Artists with country",
-                sum(1 for row in filtered_rows if clean_text(row.get("origin_country", ""))),
+                sum(1 for row in filtered_rows if get_row_location(row)),
             )
             summary_cols[2].metric(
                 "Artists with city",
@@ -833,8 +847,7 @@ with tab_explore:
             country_counts = {}
             city_counts = {}
             for row in filtered_rows:
-                country = clean_text(row.get("origin_country") or "Unknown").strip()
-                city = clean_text(row.get("origin_city") or "Unknown").strip()
+                location = get_row_location(row) or "Unknown"
                 country_counts[country] = country_counts.get(country, 0) + 1
                 city_counts[city] = city_counts.get(city, 0) + 1
 
