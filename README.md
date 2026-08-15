@@ -18,11 +18,11 @@ The app opens in your browser at `http://localhost:8501`.
 
 ## How It Works
 
-The app has two tabs:
+The app has four tabs:
 
 ### Tab 1: Find Tags (main function)
 
-1. The app automatically loads your master list from `master_reference_list.txt` (no need to paste it each time)
+1. The app loads artist names and handles directly from the SQLite artist database.
 2. Paste or upload your new list of names (no @ handles needed):
    ```
    1. Fred Jones – Supply Chain Demo
@@ -31,9 +31,23 @@ The app has two tabs:
 3. Click **Find Tags** — the tool returns:
    - Your list numbered with the matching @ tag inserted after each name
    - A deduplicated, unnumbered list of all matched @ handles
-   - Any unmatched names flagged with ⚠️
+   - Artists found without handles flagged with `⚠️ handle needed`
+   - Unknown artists flagged with `⚠️ no match found`
 
-### Tab 2: Manage Master List
+### Tab 2: Build Artist Database
+
+- Import SoundCloud-style track lines with DJ, set number, date, and show context
+- Keep repeated appearances when the same track is played in different sets
+- Store each track once, link it to every credited artist, and record each set appearance separately
+- Use **Dedupe database** to merge duplicate records; this also runs automatically when the app loads
+- Review conflicting handles in the Explore Database tab
+
+### Tab 3: Explore Artist Database
+
+- Search and summarize artists, tracks, DJs, sets, and locations
+- Review conflicting handles preserved during deduplication
+
+### Tab 4: Manage Master List
 
 This is where you view and grow your master reference list over time.
 
