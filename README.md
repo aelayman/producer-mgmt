@@ -34,7 +34,14 @@ The app has four tabs:
    - Artists found without handles flagged with `⚠️ handle needed`
    - Unknown artists flagged with `⚠️ no match found`
 
-### Tab 2: Build Artist Database
+### Tab 2: Artist Lookup
+
+- Search for one artist with typo-tolerant matching
+- Review ranked candidates and match confidence
+- Open the stored SoundCloud profile
+- See every track and DJ set where the artist appears
+
+### Tab 3: Build Artist Database
 
 - Import SoundCloud-style track lines with DJ, set number, date, and show context
 - Preview parsed lines and warnings before saving an import

@@ -201,6 +201,30 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(updated["radio_show"], "ABYSS")
         self.assertEqual(updated["track_count"], 1)
 
+    def test_artist_lookup_returns_ranked_profile_and_history(self) -> None:
+        app.append_to_artist_database(
+            [
+                {
+                    "artist_name": "Lookup Artist",
+                    "handle": "@lookupartist",
+                    "url": "https://soundcloud.com/lookupartist",
+                    "track_title": "Lookup Track",
+                }
+            ],
+            dj_name="Lookup DJ",
+            set_number="3",
+            set_date="2026-01-08",
+        )
+
+        matches = app.search_artist_directory("lookup artst")
+        self.assertEqual(matches[0]["artist_name"], "Lookup Artist")
+        self.assertEqual(matches[0]["handle"], "lookupartist")
+        self.assertGreaterEqual(matches[0]["score"], 80)
+
+        history = app.load_artist_history(matches[0]["id"])
+        self.assertEqual(history[0]["track_title"], "Lookup Track")
+        self.assertEqual(history[0]["dj_name"], "Lookup DJ")
+
 
 if __name__ == "__main__":
     unittest.main()

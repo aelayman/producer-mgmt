@@ -1080,6 +1080,63 @@ def update_set_metadata(
         conn.commit()
 
 
+def search_artist_directory(query: str, threshold: int = 60, limit: int = 10) -> list[dict]:
+    """Return ranked artist matches with stored SoundCloud details."""
+    query = strip_accents(clean_text(query).strip().lower())
+    if not query:
+        return []
+
+    init_artist_database()
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, artist_name, handle, url, location
+            FROM artists
+            ORDER BY artist_name
+            """
+        ).fetchall()
+
+    matches = []
+    for row in rows:
+        artist_name = strip_accents(row["artist_name"].strip().lower())
+        score = max(
+            fuzz.ratio(query, artist_name),
+            fuzz.token_sort_ratio(query, artist_name),
+            int(fuzz.token_set_ratio(query, artist_name) * 0.95),
+        )
+        if score >= threshold:
+            match = dict(row)
+            match["score"] = score
+            matches.append(match)
+    matches.sort(key=lambda item: (-item["score"], item["artist_name"].lower()))
+    return matches[:limit]
+
+
+def load_artist_history(artist_id: int) -> list[dict]:
+    """Load tracks and DJ sets associated with one artist."""
+    init_artist_database()
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                tc.track_title,
+                d.dj_name,
+                s.set_number,
+                s.set_date,
+                s.radio_show
+            FROM track_artists tr
+            JOIN track_catalog tc ON tc.id = tr.track_id
+            JOIN track_appearances ta ON ta.track_id = tc.id
+            JOIN sets s ON s.id = ta.set_id
+            JOIN djs d ON d.id = s.dj_id
+            WHERE tr.artist_id = ?
+            ORDER BY s.set_date DESC, s.id DESC, tc.track_title
+            """,
+            (artist_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def append_to_artist_database(
     entries: list[dict],
     dj_name: str = "",
@@ -1599,12 +1656,15 @@ with st.sidebar:
         "**How it works:**\n"
         "1. Your master list is loaded automatically from `master_reference_list.txt`\n"
         "2. Use **Find Tags** tab to match names\n"
-        "3. Use **Manage Master List** tab to view/add entries"
+        "3. Use **Artist Lookup** to find one artist and their SoundCloud details\n"
+        "4. Use **Manage Master List** tab to view/add entries"
     )
 
 
-# --- FOUR TABS: main matching function, artist database import, database explorer, and master list management ---
-tab_match, tab_database, tab_explore, tab_manage = st.tabs(["🔍 Find Tags", "🎵 Build Artist Database", "🧭 Explore Database", "📋 Manage Master List"])
+# --- FIVE TABS: matching, lookup, database import, database explorer, and master list management ---
+tab_match, tab_lookup, tab_database, tab_explore, tab_manage = st.tabs(
+    ["🔍 Find Tags", "🎧 Artist Lookup", "🎵 Build Artist Database", "🧭 Explore Database", "📋 Manage Master List"]
+)
 
 
 # =============================================================================
@@ -1716,7 +1776,77 @@ with tab_match:
 
 
 # =============================================================================
-# TAB 2: BUILD ARTIST DATABASE
+# TAB 2: ARTIST LOOKUP
+# Find one artist's stored handle, SoundCloud URL, and set history.
+# =============================================================================
+with tab_lookup:
+    st.subheader("Find one artist")
+    st.markdown("Search for an artist by name to find their stored SoundCloud details and set history.")
+
+    lookup_cols = st.columns([3, 1])
+    lookup_query = lookup_cols[0].text_input(
+        "Artist name",
+        placeholder="Try an artist name or spelling variation",
+        key="artist_lookup_query",
+    )
+    lookup_threshold = lookup_cols[1].slider(
+        "Match threshold",
+        min_value=40,
+        max_value=100,
+        value=60,
+        key="artist_lookup_threshold",
+        help="Higher values show fewer, closer matches.",
+    )
+
+    artist_matches = search_artist_directory(lookup_query, lookup_threshold)
+    if lookup_query.strip() and not artist_matches:
+        st.warning("No close artist matches found. Try a shorter name or lower the threshold.")
+    elif artist_matches:
+        st.caption(f"Showing up to {len(artist_matches)} ranked match(es). Review the score before choosing.")
+        selected_artist = st.selectbox(
+            "Choose an artist",
+            artist_matches,
+            format_func=lambda artist: f"{artist['artist_name']} ({artist['score']}% match)",
+            key="selected_lookup_artist",
+        )
+        detail_cols = st.columns(2)
+        with detail_cols[0]:
+            st.markdown(f"### {selected_artist['artist_name']}")
+            handle = format_artist_handle(selected_artist.get("handle"))
+            st.write(f"**Handle:** {handle or 'No handle stored'}")
+            if selected_artist.get("url"):
+                st.markdown(f"[Open SoundCloud profile]({selected_artist['url']})")
+            else:
+                st.warning("No SoundCloud URL is stored for this artist.")
+            if selected_artist.get("location"):
+                st.write(f"**Location:** {selected_artist['location']}")
+        with detail_cols[1]:
+            history = load_artist_history(selected_artist["id"])
+            st.metric("Set appearances", len(history))
+            st.metric("Unique tracks", len({row["track_title"] for row in history}))
+
+        if history:
+            st.markdown("#### Set history")
+            st.dataframe(
+                [
+                    {
+                        "Track": row["track_title"],
+                        "DJ": row["dj_name"],
+                        "Set": row["set_number"],
+                        "Date": row["set_date"],
+                        "Show": row["radio_show"],
+                    }
+                    for row in history
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("This artist is in the directory but has no track appearances yet.")
+
+
+# =============================================================================
+# TAB 3: BUILD ARTIST DATABASE
 # Lets the user paste SoundCloud-style artist/tag lists and save them to CSV.
 # =============================================================================
 with tab_database:
@@ -1957,7 +2087,7 @@ with tab_database:
 
 
 # =============================================================================
-# TAB 3: EXPLORE ARTIST DATABASE
+# TAB 4: EXPLORE ARTIST DATABASE
 # Lets the user search and summarize artists by country, city, DJ, and appearance.
 # =============================================================================
 with tab_explore:
@@ -2191,7 +2321,7 @@ with tab_explore:
 
 
 # =============================================================================
-# TAB 4: MANAGE MASTER LIST
+# TAB 5: MANAGE MASTER LIST
 # Lets the user view the current master list, add new entries, or bulk-paste
 # a whole new batch. Changes are saved to master_reference_list.txt.
 # =============================================================================
