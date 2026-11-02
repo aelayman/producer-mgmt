@@ -785,9 +785,10 @@ def migrate_track_identity() -> None:
         migrated = conn.execute(
             "SELECT value FROM schema_metadata WHERE key = 'track_identity_v2'"
         ).fetchone()
-        if migrated:
-            return
+    if migrated:
+        return
 
+    with get_db_connection() as conn:
         rows = conn.execute(
             """
             SELECT ta.id, ta.set_id, ta.track_id, ta.source_text, ta.notes,
@@ -1033,6 +1034,50 @@ def load_set_tracks(set_id: int) -> list[dict]:
             (set_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def update_set_metadata(
+    set_id: int,
+    dj_name: str,
+    set_number: str,
+    set_date: str,
+    radio_show: str,
+) -> None:
+    """Update set metadata while preserving its track appearances."""
+    dj_name = clean_text(dj_name).strip() or "Unknown DJ"
+    set_number = clean_text(set_number).strip() or "1"
+    set_date = clean_text(set_date).strip()
+    radio_show = clean_text(radio_show).strip() or "NO SIGNAL"
+
+    init_artist_database()
+    with get_db_connection() as conn:
+        dj_id = get_or_create_dj(conn, dj_name)
+        duplicate = conn.execute(
+            """
+            SELECT id
+            FROM sets
+            WHERE dj_id = ?
+              AND set_number = ?
+              AND set_date = ?
+              AND radio_show = ?
+              AND id != ?
+            """,
+            (dj_id, set_number, set_date, radio_show, set_id),
+        ).fetchone()
+        if duplicate:
+            raise ValueError("Another set already uses this DJ, set number, date, and radio show.")
+
+        updated = conn.execute(
+            """
+            UPDATE sets
+            SET dj_id = ?, set_number = ?, set_date = ?, radio_show = ?
+            WHERE id = ?
+            """,
+            (dj_id, set_number, set_date, radio_show, set_id),
+        ).rowcount
+        if not updated:
+            raise ValueError("That set no longer exists. Refresh the database and try again.")
+        conn.commit()
 
 
 def append_to_artist_database(
@@ -1953,6 +1998,9 @@ with tab_explore:
         st.dataframe(normalized_tables["appearances"], use_container_width=True, hide_index=True)
     with table_sets:
         st.markdown("#### Browse DJ sets")
+        set_edit_message = st.session_state.pop("set_edit_message", None)
+        if set_edit_message:
+            st.success(set_edit_message)
         if not set_summaries:
             st.info("No DJ sets have been imported yet.")
         else:
@@ -2023,6 +2071,37 @@ with tab_explore:
                     use_container_width=True,
                     hide_index=True,
                 )
+                try:
+                    selected_date = date.fromisoformat(selected_set["set_date"])
+                except (TypeError, ValueError):
+                    selected_date = date.today()
+
+                with st.form("edit_selected_set"):
+                    st.markdown("#### Edit set details")
+                    edit_cols = st.columns(4)
+                    edited_dj = edit_cols[0].text_input("DJ", value=selected_set["dj_name"])
+                    edited_number = edit_cols[1].text_input("Set number", value=selected_set["set_number"])
+                    edited_date = edit_cols[2].date_input("Date", value=selected_date, format="YYYY-MM-DD")
+                    edited_show = edit_cols[3].text_input("Radio show", value=selected_set["radio_show"])
+                    save_set = st.form_submit_button("Save set details", type="primary")
+
+                if save_set:
+                    try:
+                        update_set_metadata(
+                            selected_set["id"],
+                            edited_dj,
+                            edited_number,
+                            edited_date.isoformat(),
+                            edited_show,
+                        )
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.session_state["set_edit_message"] = (
+                            f"Updated {edited_dj.strip() or 'Unknown DJ'} set "
+                            f"{edited_number.strip() or '1'}."
+                        )
+                        st.rerun()
             else:
                 st.info("No sets match those filters.")
 

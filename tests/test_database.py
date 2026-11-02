@@ -172,6 +172,35 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(tracks[0]["track_title"], "Set Track")
         self.assertEqual(tracks[0]["credited_artists"], "Set Artist")
 
+    def test_set_metadata_can_be_updated_without_losing_tracks(self) -> None:
+        app.append_to_artist_database(
+            [
+                {
+                    "artist_name": "Editable Artist",
+                    "track_title": "Editable Track",
+                }
+            ],
+            dj_name="Original DJ",
+            set_number="1",
+            set_date="2026-01-06",
+        )
+        set_row = app.load_set_summaries()[0]
+
+        app.update_set_metadata(
+            set_row["id"],
+            "Renamed DJ",
+            "2",
+            "2026-01-07",
+            "ABYSS",
+        )
+
+        updated = app.load_set_summaries()[0]
+        self.assertEqual(updated["dj_name"], "Renamed DJ")
+        self.assertEqual(updated["set_number"], "2")
+        self.assertEqual(updated["set_date"], "2026-01-07")
+        self.assertEqual(updated["radio_show"], "ABYSS")
+        self.assertEqual(updated["track_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
