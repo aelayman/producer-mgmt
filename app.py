@@ -175,6 +175,71 @@ def create_database_backup() -> tuple[str, bytes]:
         return filename, Path(temporary_file.name).read_bytes()
 
 
+def get_latest_import() -> dict[str, object] | None:
+    """Return the newest import batch that can be safely undone."""
+    init_artist_database()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT ib.id, ib.set_id, ib.created_at, d.dj_name,
+                   s.set_number, s.set_date, s.radio_show,
+                   COUNT(ta.id) AS appearance_count
+            FROM import_batches ib
+            JOIN sets s ON s.id = ib.set_id
+            JOIN djs d ON d.id = s.dj_id
+            LEFT JOIN track_appearances ta ON ta.set_id = s.id
+            GROUP BY ib.id, ib.set_id, ib.created_at, d.dj_name,
+                     s.set_number, s.set_date, s.radio_show
+            ORDER BY ib.id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def undo_latest_import() -> dict[str, object] | None:
+    """Remove the newest tracked import without deleting shared artists."""
+    init_artist_database()
+    with get_db_connection() as conn:
+        batch = conn.execute(
+            """
+            SELECT ib.id, ib.set_id, d.dj_name, s.set_number, s.set_date, s.radio_show
+            FROM import_batches ib
+            JOIN sets s ON s.id = ib.set_id
+            JOIN djs d ON d.id = s.dj_id
+            ORDER BY ib.id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if not batch:
+            return None
+
+        conn.execute("DELETE FROM import_batches WHERE id = ?", (batch["id"],))
+        conn.execute("DELETE FROM track_appearances WHERE set_id = ?", (batch["set_id"],))
+        conn.execute("DELETE FROM sets WHERE id = ?", (batch["set_id"],))
+        conn.execute(
+            """
+            DELETE FROM track_artists
+            WHERE track_id IN (
+                SELECT tc.id
+                FROM track_catalog tc
+                LEFT JOIN track_appearances ta ON ta.track_id = tc.id
+                WHERE ta.id IS NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM track_catalog
+            WHERE NOT EXISTS (
+                SELECT 1 FROM track_appearances ta WHERE ta.track_id = track_catalog.id
+            )
+            """
+        )
+        conn.commit()
+        return dict(batch)
+
+
 def clean_text(value: object) -> str:
     """Convert database values to strings and treat None as empty text."""
     if value is None:
@@ -290,6 +355,16 @@ def init_artist_database() -> None:
                 UNIQUE(set_id, track_id),
                 FOREIGN KEY(set_id) REFERENCES sets(id),
                 FOREIGN KEY(track_id) REFERENCES track_catalog(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS import_batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                set_id INTEGER NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(set_id) REFERENCES sets(id)
             )
             """
         )
@@ -999,6 +1074,14 @@ def append_to_artist_database(
             )
             created_count += 1
 
+        if created_count:
+            conn.execute(
+                """
+                INSERT INTO import_batches (set_id, created_at)
+                VALUES (?, ?)
+                """,
+                (set_id, now),
+            )
         conn.commit()
     return {"created": created_count, "skipped_duplicates": skipped_duplicates}
 
@@ -1716,6 +1799,9 @@ with tab_database:
 
     with st.expander("Database health and backups"):
         health = get_database_health()
+        undo_message = st.session_state.pop("undo_message", None)
+        if undo_message:
+            st.success(undo_message)
         health_cols = st.columns(5)
         health_cols[0].metric("DJs", health["djs"])
         health_cols[1].metric("Sets", health["sets"])
@@ -1736,6 +1822,22 @@ with tab_database:
                 f"Latest set: {health['latest_dj']} · set {health['latest_set_number']} · "
                 f"{health['latest_set_date']} · {health['latest_radio_show']}"
             )
+
+        latest_import = get_latest_import()
+        if latest_import:
+            st.caption(
+                f"Undo available: {latest_import['dj_name']} · set {latest_import['set_number']} · "
+                f"{latest_import['set_date']} ({latest_import['appearance_count']} appearances)"
+            )
+            if st.button("↩️ Undo latest import", key="undo_latest_import"):
+                undone_import = undo_latest_import()
+                if undone_import:
+                    st.session_state["undo_message"] = (
+                        f"Undid {undone_import['dj_name']} set {undone_import['set_number']}."
+                    )
+                    st.rerun()
+        else:
+            st.caption("Undo is available for imports made after this feature was added.")
 
         if st.button("Create database backup", key="create_database_backup"):
             backup_name, backup_bytes = create_database_backup()

@@ -38,6 +38,7 @@ The app has four tabs:
 
 - Import SoundCloud-style track lines with DJ, set number, date, and show context
 - Preview parsed lines and warnings before saving an import
+- Undo the latest confirmed import without deleting shared artists or tracks
 - Keep repeated appearances when the same track is played in different sets
 - Store each track once, link it to every credited artist, and record each set appearance separately
 - Use **Dedupe database** to merge duplicate records; this also runs automatically when the app loads
@@ -46,6 +47,8 @@ The app has four tabs:
 The database uses separate tables for DJs, sets, artists, unique tracks, artist credits, and set appearances. A track is stored once in the catalog and can appear in many DJ sets.
 
 The **Database health and backups** section in the Build Artist Database tab shows record counts, checks for broken links, and creates a downloadable SQLite backup.
+
+Imports made after the undo feature was added can be reversed from the same section. Older imports are not assigned an undo record and are left unchanged.
 
 ### Tab 3: Explore Artist Database
 

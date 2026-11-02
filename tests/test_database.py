@@ -110,6 +110,44 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn("track_appearances", tables)
         self.assertNotIn("tracks", tables)
 
+    def test_undo_latest_import_preserves_shared_tracks_and_artists(self) -> None:
+        entry = [
+            {
+                "artist_name": "Shared Artist",
+                "track_title": "Shared Track",
+                "source_text": "Shared Artist - Shared Track",
+            }
+        ]
+        app.append_to_artist_database(
+            entry,
+            dj_name="First DJ",
+            set_number="1",
+            set_date="2026-01-03",
+        )
+        app.append_to_artist_database(
+            entry,
+            dj_name="Second DJ",
+            set_number="2",
+            set_date="2026-01-04",
+        )
+
+        undone = app.undo_latest_import()
+        self.assertEqual(undone["dj_name"], "Second DJ")
+        health = app.get_database_health()
+        self.assertEqual(health["sets"], 1)
+        self.assertEqual(health["tracks"], 1)
+        self.assertEqual(health["appearances"], 1)
+        self.assertEqual(health["artists"], 1)
+
+        undone = app.undo_latest_import()
+        self.assertEqual(undone["dj_name"], "First DJ")
+        health = app.get_database_health()
+        self.assertEqual(health["sets"], 0)
+        self.assertEqual(health["tracks"], 0)
+        self.assertEqual(health["appearances"], 0)
+        self.assertEqual(health["artists"], 1)
+        self.assertIsNone(app.get_latest_import())
+
 
 if __name__ == "__main__":
     unittest.main()
