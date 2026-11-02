@@ -224,6 +224,9 @@ class DatabaseTests(unittest.TestCase):
         history = app.load_artist_history(matches[0]["id"])
         self.assertEqual(history[0]["track_title"], "Lookup Track")
         self.assertEqual(history[0]["dj_name"], "Lookup DJ")
+        history_csv = app.export_artist_history_csv(history)
+        self.assertIn("track_title,dj_name,set_number,set_date,radio_show", history_csv)
+        self.assertIn("Lookup Track,Lookup DJ,3,2026-01-08,NO SIGNAL", history_csv)
 
 
 if __name__ == "__main__":

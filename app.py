@@ -1137,6 +1137,16 @@ def load_artist_history(artist_id: int) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+def export_artist_history_csv(history: list[dict]) -> str:
+    """Export one artist's appearance history as CSV."""
+    output = StringIO()
+    fieldnames = ["track_title", "dj_name", "set_number", "set_date", "radio_show"]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows({field: row.get(field, "") for field in fieldnames} for row in history)
+    return output.getvalue()
+
+
 def append_to_artist_database(
     entries: list[dict],
     dj_name: str = "",
@@ -1813,20 +1823,38 @@ with tab_lookup:
         with detail_cols[0]:
             st.markdown(f"### {selected_artist['artist_name']}")
             handle = format_artist_handle(selected_artist.get("handle"))
-            st.write(f"**Handle:** {handle or 'No handle stored'}")
+            st.write("**Handle**")
+            st.code(handle or "No handle recorded", language=None)
             if selected_artist.get("url"):
                 st.markdown(f"[Open SoundCloud profile]({selected_artist['url']})")
             else:
-                st.warning("No SoundCloud URL is stored for this artist.")
+                st.caption("No SoundCloud profile recorded.")
             if selected_artist.get("location"):
                 st.write(f"**Location:** {selected_artist['location']}")
         with detail_cols[1]:
             history = load_artist_history(selected_artist["id"])
             st.metric("Set appearances", len(history))
             st.metric("Unique tracks", len({row["track_title"] for row in history}))
+            st.metric("Unique DJs", len({row["dj_name"] for row in history}))
+            if history:
+                dates = [row["set_date"] for row in history if row["set_date"]]
+                st.caption(f"Most recent appearance: {max(dates) if dates else 'Unknown'}")
 
         if history:
             st.markdown("#### Set history")
+            history_text = "\n".join(
+                f"{row['track_title']} — {row['dj_name']} · set {row['set_number']} · "
+                f"{row['set_date']} · {row['radio_show']}"
+                for row in history
+            )
+            st.code(history_text, language=None)
+            st.download_button(
+                "Download artist history CSV",
+                data=export_artist_history_csv(history),
+                file_name=f"{selected_artist['artist_name']}_history.csv",
+                mime="text/csv",
+                key="download_artist_history",
+            )
             st.dataframe(
                 [
                     {

@@ -39,6 +39,8 @@ The app has four tabs:
 - Search for one artist with typo-tolerant matching
 - Review ranked candidates and match confidence
 - Open the stored SoundCloud profile
+- Copy the stored handle and appearance history
+- Download the artist's track and DJ set history as CSV
 - See every track and DJ set where the artist appears
 
 ### Tab 3: Build Artist Database
