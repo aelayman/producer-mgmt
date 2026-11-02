@@ -148,6 +148,30 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(health["artists"], 1)
         self.assertIsNone(app.get_latest_import())
 
+    def test_set_browser_returns_summary_and_tracklist(self) -> None:
+        app.append_to_artist_database(
+            [
+                {
+                    "artist_name": "Set Artist",
+                    "track_title": "Set Track",
+                    "source_text": "Set Artist - Set Track",
+                }
+            ],
+            dj_name="Set DJ",
+            set_number="12",
+            set_date="2026-01-05",
+            radio_show="ABYSS",
+        )
+
+        summaries = app.load_set_summaries()
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["dj_name"], "Set DJ")
+        self.assertEqual(summaries[0]["track_count"], 1)
+
+        tracks = app.load_set_tracks(summaries[0]["id"])
+        self.assertEqual(tracks[0]["track_title"], "Set Track")
+        self.assertEqual(tracks[0]["credited_artists"], "Set Artist")
+
 
 if __name__ == "__main__":
     unittest.main()

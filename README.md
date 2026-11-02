@@ -53,6 +53,7 @@ Imports made after the undo feature was added can be reversed from the same sect
 ### Tab 3: Explore Artist Database
 
 - Search and summarize artists, tracks, DJs, sets, and locations
+- Browse DJ sets by DJ, radio show, set number, or date and inspect an individual tracklist
 - Review conflicting handles preserved during deduplication
 
 ### Tab 4: Manage Master List

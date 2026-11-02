@@ -989,6 +989,52 @@ def load_normalized_database_tables() -> dict[str, list[dict]]:
         }
 
 
+def load_set_summaries() -> list[dict]:
+    """Load one summary row for each DJ set."""
+    init_artist_database()
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                s.id,
+                d.dj_name,
+                s.set_number,
+                s.set_date,
+                s.radio_show,
+                COUNT(DISTINCT ta.track_id) AS track_count
+            FROM sets s
+            JOIN djs d ON d.id = s.dj_id
+            LEFT JOIN track_appearances ta ON ta.set_id = s.id
+            GROUP BY s.id, d.dj_name, s.set_number, s.set_date, s.radio_show
+            ORDER BY s.set_date DESC, s.id DESC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def load_set_tracks(set_id: int) -> list[dict]:
+    """Load the credited tracklist for one DJ set."""
+    init_artist_database()
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                tc.track_title,
+                GROUP_CONCAT(a.artist_name, ', ') AS credited_artists,
+                ta.source_text
+            FROM track_appearances ta
+            JOIN track_catalog tc ON tc.id = ta.track_id
+            LEFT JOIN track_artists tr ON tr.track_id = tc.id
+            LEFT JOIN artists a ON a.id = tr.artist_id
+            WHERE ta.set_id = ?
+            GROUP BY ta.id, tc.track_title, ta.source_text
+            ORDER BY ta.id
+            """,
+            (set_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
 def append_to_artist_database(
     entries: list[dict],
     dj_name: str = "",
@@ -1876,6 +1922,7 @@ with tab_explore:
     artist_rows = load_artist_database()
     conflict_rows = load_artist_handle_conflicts()
     normalized_tables = load_normalized_database_tables()
+    set_summaries = load_set_summaries()
     if conflict_rows:
         st.warning(f"{len(conflict_rows)} conflicting handle(s) were preserved for review.")
         st.dataframe(
@@ -1893,8 +1940,8 @@ with tab_explore:
         )
 
     st.markdown("#### Database tables")
-    table_artists, table_tracks, table_credits, table_appearances = st.tabs(
-        ["Artists", "Tracks", "Track Credits", "Set Appearances"]
+    table_artists, table_tracks, table_credits, table_appearances, table_sets = st.tabs(
+        ["Artists", "Tracks", "Track Credits", "Set Appearances", "DJ Sets"]
     )
     with table_artists:
         st.dataframe(normalized_tables["artists"], use_container_width=True, hide_index=True)
@@ -1904,6 +1951,80 @@ with tab_explore:
         st.dataframe(normalized_tables["credits"], use_container_width=True, hide_index=True)
     with table_appearances:
         st.dataframe(normalized_tables["appearances"], use_container_width=True, hide_index=True)
+    with table_sets:
+        st.markdown("#### Browse DJ sets")
+        if not set_summaries:
+            st.info("No DJ sets have been imported yet.")
+        else:
+            filter_cols = st.columns(3)
+            dj_filter = filter_cols[0].selectbox(
+                "DJ",
+                ["All DJs"] + sorted({row["dj_name"] for row in set_summaries}),
+                key="set_dj_filter",
+            )
+            show_filter = filter_cols[1].selectbox(
+                "Radio show",
+                ["All shows"] + sorted({row["radio_show"] for row in set_summaries}),
+                key="set_show_filter",
+            )
+            set_search = filter_cols[2].text_input(
+                "Search sets",
+                placeholder="Set number or date",
+                key="set_search",
+            ).strip().lower()
+
+            filtered_sets = [
+                row
+                for row in set_summaries
+                if (dj_filter == "All DJs" or row["dj_name"] == dj_filter)
+                and (show_filter == "All shows" or row["radio_show"] == show_filter)
+                and (
+                    not set_search
+                    or set_search in str(row["set_number"]).lower()
+                    or set_search in str(row["set_date"]).lower()
+                )
+            ]
+            st.caption(f"Showing {len(filtered_sets)} of {len(set_summaries)} sets.")
+            st.dataframe(
+                [
+                    {
+                        "DJ": row["dj_name"],
+                        "Set": row["set_number"],
+                        "Date": row["set_date"],
+                        "Show": row["radio_show"],
+                        "Tracks": row["track_count"],
+                    }
+                    for row in filtered_sets
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            if filtered_sets:
+                selected_set = st.selectbox(
+                    "View tracklist",
+                    filtered_sets,
+                    format_func=lambda row: (
+                        f"{row['dj_name']} · set {row['set_number']} · "
+                        f"{row['set_date']} ({row['track_count']} tracks)"
+                    ),
+                    key="selected_set",
+                )
+                selected_tracks = load_set_tracks(selected_set["id"])
+                st.dataframe(
+                    [
+                        {
+                            "Track": row["track_title"],
+                            "Artists": row["credited_artists"] or "",
+                            "Source": row["source_text"] or "",
+                        }
+                        for row in selected_tracks
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("No sets match those filters.")
 
     if not artist_rows:
         st.info("No artists have been imported yet. Use the Build Artist Database tab to add your first batch.")
