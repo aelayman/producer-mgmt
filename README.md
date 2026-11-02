@@ -44,6 +44,8 @@ The app has four tabs:
 
 The database uses separate tables for DJs, sets, artists, unique tracks, artist credits, and set appearances. A track is stored once in the catalog and can appear in many DJ sets.
 
+The **Database health and backups** section in the Build Artist Database tab shows record counts, checks for broken links, and creates a downloadable SQLite backup.
+
 ### Tab 3: Explore Artist Database
 
 - Search and summarize artists, tracks, DJs, sets, and locations
@@ -74,3 +76,11 @@ Jane Smith @jsmith – Power Platform demo
 ## Match Sensitivity
 
 Use the sidebar slider to adjust how strict the matching is (default 82/100). Higher = stricter. If you're getting false matches, increase it. If names aren't matching when they should, decrease it.
+
+## Development checks
+
+Run the database behavior tests before making changes:
+
+```bash
+python -m unittest discover -s tests -v
+```

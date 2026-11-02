@@ -38,9 +38,10 @@ import csv
 import re
 import sqlite3
 import unicodedata
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from io import StringIO
 from pathlib import Path
+import tempfile
 import streamlit as st
 from thefuzz import fuzz  # fuzzy string matching library (uses Levenshtein distance)
 
@@ -99,6 +100,79 @@ def get_db_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def get_database_health() -> dict[str, int | str]:
+    """Return counts and warnings that describe the current database health."""
+    init_artist_database()
+    with get_db_connection() as conn:
+        counts = {
+            "djs": conn.execute("SELECT COUNT(*) FROM djs").fetchone()[0],
+            "sets": conn.execute("SELECT COUNT(*) FROM sets").fetchone()[0],
+            "artists": conn.execute("SELECT COUNT(*) FROM artists").fetchone()[0],
+            "tracks": conn.execute("SELECT COUNT(*) FROM track_catalog").fetchone()[0],
+            "appearances": conn.execute("SELECT COUNT(*) FROM track_appearances").fetchone()[0],
+            "sets_without_tracks": conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM sets s
+                LEFT JOIN track_appearances ta ON ta.set_id = s.id
+                WHERE ta.id IS NULL
+                """
+            ).fetchone()[0],
+            "orphaned_appearances": conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM track_appearances ta
+                LEFT JOIN sets s ON s.id = ta.set_id
+                LEFT JOIN track_catalog tc ON tc.id = ta.track_id
+                WHERE s.id IS NULL OR tc.id IS NULL
+                """
+            ).fetchone()[0],
+        }
+        latest = conn.execute(
+            """
+            SELECT d.dj_name, s.set_number, s.set_date, s.radio_show
+            FROM sets s
+            JOIN djs d ON d.id = s.dj_id
+            ORDER BY s.set_date DESC, s.id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    if latest:
+        counts.update(
+            {
+                "latest_dj": latest["dj_name"],
+                "latest_set_number": latest["set_number"],
+                "latest_set_date": latest["set_date"] or "",
+                "latest_radio_show": latest["radio_show"],
+            }
+        )
+    else:
+        counts.update(
+            {
+                "latest_dj": "",
+                "latest_set_number": "",
+                "latest_set_date": "",
+                "latest_radio_show": "",
+            }
+        )
+    return counts
+
+
+def create_database_backup() -> tuple[str, bytes]:
+    """Create a consistent SQLite backup and return its download name and bytes."""
+    init_artist_database()
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"artist_database_backup_{timestamp}.db"
+
+    with tempfile.NamedTemporaryFile(suffix=".db") as temporary_file:
+        with get_db_connection() as source:
+            with sqlite3.connect(temporary_file.name) as destination:
+                source.backup(destination)
+                destination.commit()
+        return filename, Path(temporary_file.name).read_bytes()
 
 
 def clean_text(value: object) -> str:
@@ -280,7 +354,7 @@ def record_artist_handle_conflict(
             (artist_id, artist_name, handle, url, source_text, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (artist_id, artist_name, handle, url, source_text, datetime.utcnow().isoformat()),
+        (artist_id, artist_name, handle, url, source_text, datetime.now(timezone.utc).isoformat()),
     )
 
 
@@ -360,7 +434,7 @@ def log_track_correction(
                 original_set_id,
                 corrected_set_id,
                 handle,
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
                 soundcloud_url,
                 notes,
             ),
@@ -852,7 +926,7 @@ def append_to_artist_database(
         return {"created": 0, "skipped_duplicates": 0}
 
     init_artist_database()
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     with get_db_connection() as conn:
         existing_set = find_existing_set(conn, dj_name, set_number, set_date, radio_show)
@@ -1533,6 +1607,44 @@ with tab_database:
             f"Scanned {dedupe_result['djs']} DJ rows, {dedupe_result['artists']} artist rows, "
             f"{dedupe_result['sets']} set rows."
         )
+
+    with st.expander("Database health and backups"):
+        health = get_database_health()
+        health_cols = st.columns(5)
+        health_cols[0].metric("DJs", health["djs"])
+        health_cols[1].metric("Sets", health["sets"])
+        health_cols[2].metric("Artists", health["artists"])
+        health_cols[3].metric("Unique tracks", health["tracks"])
+        health_cols[4].metric("Appearances", health["appearances"])
+
+        if health["sets_without_tracks"] or health["orphaned_appearances"]:
+            st.warning(
+                f"Review needed: {health['sets_without_tracks']} set(s) without tracks and "
+                f"{health['orphaned_appearances']} orphaned appearance(s)."
+            )
+        else:
+            st.success("Database health check passed: every set has tracks and all appearances are linked.")
+
+        if health["latest_dj"]:
+            st.caption(
+                f"Latest set: {health['latest_dj']} · set {health['latest_set_number']} · "
+                f"{health['latest_set_date']} · {health['latest_radio_show']}"
+            )
+
+        if st.button("Create database backup", key="create_database_backup"):
+            backup_name, backup_bytes = create_database_backup()
+            st.session_state["database_backup"] = (backup_name, backup_bytes)
+            st.success("Backup created. Download it before closing this page.")
+
+        if "database_backup" in st.session_state:
+            backup_name, backup_bytes = st.session_state["database_backup"]
+            st.download_button(
+                "Download database backup",
+                data=backup_bytes,
+                file_name=backup_name,
+                mime="application/vnd.sqlite3",
+                key="download_database_backup",
+            )
 
     st.markdown("---")
     st.caption(f"Database file: {ARTIST_DATABASE_PATH}")
