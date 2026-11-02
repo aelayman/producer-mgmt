@@ -42,6 +42,8 @@ The app has four tabs:
 - Use **Dedupe database** to merge duplicate records; this also runs automatically when the app loads
 - Review conflicting handles in the Explore Database tab
 
+The database uses separate tables for DJs, sets, artists, unique tracks, artist credits, and set appearances. A track is stored once in the catalog and can appear in many DJ sets.
+
 ### Tab 3: Explore Artist Database
 
 - Search and summarize artists, tracks, DJs, sets, and locations

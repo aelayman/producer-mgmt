@@ -37,6 +37,7 @@ ADJUSTING THE MATCHING:
 import csv
 import re
 import sqlite3
+import unicodedata
 from datetime import date, datetime
 from io import StringIO
 from pathlib import Path
@@ -95,6 +96,7 @@ def append_to_master_list(new_entries: str) -> int:
 def get_db_connection() -> sqlite3.Connection:
     """Create a SQLite database connection for the artist database."""
     conn = sqlite3.connect(ARTIST_DATABASE_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -109,14 +111,25 @@ def clean_text(value: object) -> str:
 def normalize_lookup_text(value: object) -> str:
     """Normalize names so duplicate records can be detected reliably."""
     value = clean_text(value).strip().lower()
-    value = re.sub(r"[^a-z0-9]+", " ", value)
+    # \w keeps unicode letters/digits (e.g. π, П) so names in other scripts aren't stripped to nothing.
+    value = re.sub(r"[^\w]+", " ", value)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def strip_accents(value: str) -> str:
+    """Remove diacritics so accent-only spelling differences don't hurt fuzzy match scores."""
+    return "".join(c for c in unicodedata.normalize("NFKD", value) if not unicodedata.combining(c))
 
 
 def format_artist_handle(handle: object) -> str:
     """Format a stored artist handle with exactly one leading @ symbol."""
     handle = clean_text(handle).strip()
     return f"@{handle.lstrip('@')}" if handle else ""
+
+
+def normalize_artist_handle(handle: object) -> str:
+    """Normalize artist tags so capitalization never creates a separate tag."""
+    return clean_text(handle).strip().lstrip("@").lower()
 
 
 def init_artist_database() -> None:
@@ -150,20 +163,6 @@ def init_artist_database() -> None:
                 handle TEXT,
                 url TEXT,
                 location TEXT
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tracks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                set_id INTEGER NOT NULL,
-                artist_id INTEGER NOT NULL,
-                track_title TEXT NOT NULL,
-                source_text TEXT,
-                notes TEXT,
-                first_seen TEXT,
-                last_seen TEXT
             )
             """
         )
@@ -220,9 +219,37 @@ def init_artist_database() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS track_corrections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id INTEGER NOT NULL,
+                artist_id INTEGER NOT NULL,
+                original_set_id INTEGER,
+                corrected_set_id INTEGER,
+                handle TEXT,
+                corrected_date TEXT,
+                soundcloud_url TEXT,
+                notes TEXT,
+                FOREIGN KEY(track_id) REFERENCES track_catalog(id),
+                FOREIGN KEY(artist_id) REFERENCES artists(id),
+                FOREIGN KEY(original_set_id) REFERENCES sets(id),
+                FOREIGN KEY(corrected_set_id) REFERENCES sets(id)
+            )
+            """
+        )
         conn.commit()
-        migrate_legacy_tracks()
+        normalize_artist_handles()
         dedupe_artist_database()
+        migrate_track_identity()
 
 
 def get_or_create_dj(conn: sqlite3.Connection, dj_name: str) -> int:
@@ -243,6 +270,8 @@ def record_artist_handle_conflict(
     source_text: str = "",
 ) -> None:
     """Preserve a non-matching handle instead of silently discarding it."""
+    handle = normalize_artist_handle(handle)
+    url = clean_text(url).strip()
     if not handle and not url:
         return
     conn.execute(
@@ -255,8 +284,150 @@ def record_artist_handle_conflict(
     )
 
 
+def find_track_corrections() -> list[dict]:
+    """
+    Find tracks that appear in multiple sets where the artist's handle was missing
+    in an earlier appearance but was found in a later appearance.
+    Returns list of corrections found.
+    """
+    with get_db_connection() as conn:
+        corrections = conn.execute(
+            """
+            -- Find tracks appearing in 2+ sets with the same artist
+            WITH track_appearances_by_artist AS (
+                SELECT
+                    tc.id AS track_id,
+                    tc.track_title,
+                    tr.artist_id,
+                    a.artist_name,
+                    a.handle,
+                    ta.set_id,
+                    s.set_date,
+                    d.dj_name,
+                    ROW_NUMBER() OVER (PARTITION BY tc.id, tr.artist_id ORDER BY s.set_date) as appearance_order
+                FROM track_catalog tc
+                JOIN track_artists tr ON tc.id = tr.track_id
+                JOIN artists a ON tr.artist_id = a.id
+                JOIN track_appearances ta ON tc.id = ta.track_id
+                JOIN sets s ON ta.set_id = s.id
+                JOIN djs d ON s.dj_id = d.id
+            )
+            SELECT
+                t1.track_id,
+                t1.artist_id,
+                t1.artist_name,
+                t1.track_title,
+                t1.set_id AS original_set_id,
+                t1.dj_name AS original_dj,
+                t1.set_date AS original_date,
+                t2.set_id AS corrected_set_id,
+                t2.dj_name AS corrected_dj,
+                t2.set_date AS corrected_date,
+                t2.handle AS handle_found
+            FROM track_appearances_by_artist t1
+            JOIN track_appearances_by_artist t2 
+                ON t1.track_id = t2.track_id 
+                AND t1.artist_id = t2.artist_id
+                AND t2.appearance_order > t1.appearance_order
+            WHERE t1.handle IS NULL
+                AND t2.handle IS NOT NULL
+            ORDER BY t1.track_id, t1.artist_id, t1.set_date
+            """
+        ).fetchall()
+        return [dict(row) for row in corrections]
+
+
+def log_track_correction(
+    track_id: int,
+    artist_id: int,
+    original_set_id: int,
+    corrected_set_id: int,
+    handle: str,
+    soundcloud_url: str = "",
+    notes: str = "",
+) -> None:
+    """Log a track correction to the corrections table."""
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO track_corrections
+                (track_id, artist_id, original_set_id, corrected_set_id, handle, corrected_date, soundcloud_url, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                track_id,
+                artist_id,
+                original_set_id,
+                corrected_set_id,
+                handle,
+                datetime.utcnow().isoformat(),
+                soundcloud_url,
+                notes,
+            ),
+        )
+        conn.commit()
+
+
+def get_corrections_log() -> list[dict]:
+    """Retrieve all logged corrections."""
+    with get_db_connection() as conn:
+        corrections = conn.execute(
+            """
+            SELECT
+                tc.id,
+                tc.track_id,
+                tc.artist_id,
+                tc_cat.track_title,
+                a.artist_name,
+                tc.handle,
+                tc.corrected_date,
+                tc.soundcloud_url,
+                tc.notes,
+                d1.dj_name AS original_dj,
+                s1.set_date AS original_date,
+                d2.dj_name AS corrected_dj,
+                s2.set_date AS corrected_date
+            FROM track_corrections tc
+            JOIN track_catalog tc_cat ON tc.track_id = tc_cat.id
+            JOIN artists a ON tc.artist_id = a.id
+            JOIN sets s1 ON tc.original_set_id = s1.id
+            JOIN djs d1 ON s1.dj_id = d1.id
+            JOIN sets s2 ON tc.corrected_set_id = s2.id
+            JOIN djs d2 ON s2.dj_id = d2.id
+            ORDER BY tc.corrected_date DESC
+            """
+        ).fetchall()
+        return [dict(row) for row in corrections]
+
+
+def normalize_artist_handles() -> None:
+    """Lowercase existing handles and remove conflicts caused only by case."""
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE artists SET handle = LOWER(TRIM(REPLACE(handle, '@', ''))) "
+            "WHERE TRIM(COALESCE(handle, '')) != ''"
+        )
+        conn.execute(
+            "UPDATE artist_handle_conflicts SET handle = LOWER(TRIM(REPLACE(handle, '@', ''))) "
+            "WHERE TRIM(COALESCE(handle, '')) != ''"
+        )
+        conn.execute(
+            """
+            DELETE FROM artist_handle_conflicts
+            WHERE EXISTS (
+                SELECT 1
+                FROM artists a
+                WHERE a.id = artist_handle_conflicts.artist_id
+                  AND LOWER(TRIM(COALESCE(a.handle, ''))) = LOWER(TRIM(COALESCE(artist_handle_conflicts.handle, '')))
+                  AND LOWER(TRIM(COALESCE(a.url, ''))) = LOWER(TRIM(COALESCE(artist_handle_conflicts.url, '')))
+            )
+            """
+        )
+        conn.commit()
+
+
 def dedupe_artist_database() -> dict[str, int]:
-    """Merge obvious duplicate DJs, artists, sets, and tracks in the SQLite database."""
+    """Merge obvious duplicate DJs, artists, and sets in the SQLite database."""
     with get_db_connection() as conn:
         # Merge duplicate DJs by normalized name.
         dj_rows = conn.execute("SELECT id, dj_name FROM djs ORDER BY id").fetchall()
@@ -280,7 +451,6 @@ def dedupe_artist_database() -> dict[str, int]:
                 continue
             if key in artist_map:
                 target_id = artist_map[key]
-                conn.execute("UPDATE tracks SET artist_id = ? WHERE artist_id = ?", (target_id, row["id"]))
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO track_artists (track_id, artist_id, credit_order)
@@ -327,7 +497,6 @@ def dedupe_artist_database() -> dict[str, int]:
             )
             if key in set_map:
                 target_id = set_map[key]
-                conn.execute("UPDATE tracks SET set_id = ? WHERE set_id = ?", (target_id, row["id"]))
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO track_appearances
@@ -343,28 +512,12 @@ def dedupe_artist_database() -> dict[str, int]:
             else:
                 set_map[key] = row["id"]
 
-        # Remove duplicate tracks for the same set/artist/title/source.
-        track_rows = conn.execute("SELECT id, set_id, artist_id, track_title, source_text FROM tracks ORDER BY id").fetchall()
-        seen_tracks: set[tuple] = set()
-        for row in track_rows:
-            key = (
-                row["set_id"],
-                row["artist_id"],
-                normalize_lookup_text(row["track_title"]),
-                normalize_lookup_text(row["source_text"]),
-            )
-            if key in seen_tracks:
-                conn.execute("DELETE FROM tracks WHERE id = ?", (row["id"],))
-            else:
-                seen_tracks.add(key)
-
         conn.commit()
 
         return {
             "djs": len(dj_rows),
             "artists": len(artist_rows),
             "sets": len(set_rows),
-            "tracks": len(track_rows),
         }
 
 
@@ -421,8 +574,8 @@ def get_or_create_artist(
     source_text: str = "",
 ) -> int:
     artist_name = clean_text(artist_name).strip() or "Unknown artist"
-    handle = clean_text(handle).strip()
-    url = clean_text(url).strip()
+    handle = normalize_artist_handle(handle)
+    url = clean_text(url).strip().lower()
     location = clean_text(location).strip()
     existing = conn.execute("SELECT id, handle, url, location FROM artists WHERE artist_name = ?", (artist_name,)).fetchone()
     if existing:
@@ -442,9 +595,21 @@ def get_or_create_artist(
     return int(cursor.lastrowid)
 
 
-def get_or_create_track(conn: sqlite3.Connection, track_title: str, now: str) -> int:
+def make_track_key(track_title: str, artist_names: list[str]) -> str:
+    """Identify a recording by normalized title and its credited artist set."""
+    title_key = normalize_lookup_text(track_title)
+    artist_keys = sorted({normalize_lookup_text(name) for name in artist_names if normalize_lookup_text(name)})
+    return f"{title_key}||{'||'.join(artist_keys)}"
+
+
+def get_or_create_track(
+    conn: sqlite3.Connection,
+    track_title: str,
+    now: str,
+    artist_names: list[str] | None = None,
+) -> int:
     track_title = clean_text(track_title).strip() or "Untitled track"
-    track_key = normalize_lookup_text(track_title)
+    track_key = make_track_key(track_title, artist_names or [])
     existing = conn.execute(
         "SELECT id FROM track_catalog WHERE track_key = ?",
         (track_key,),
@@ -465,47 +630,99 @@ def get_or_create_track(conn: sqlite3.Connection, track_title: str, now: str) ->
     return int(cursor.lastrowid)
 
 
-def migrate_legacy_tracks() -> None:
-    """Copy rows from the original appearance-shaped tracks table into the normalized tables."""
-    now = datetime.utcnow().isoformat()
+def migrate_track_identity() -> None:
+    """Split title-only tracks so repeats require the same credited artists."""
     with get_db_connection() as conn:
-        legacy_rows = conn.execute(
+        migrated = conn.execute(
+            "SELECT value FROM schema_metadata WHERE key = 'track_identity_v2'"
+        ).fetchone()
+        if migrated:
+            return
+
+        rows = conn.execute(
             """
-            SELECT
-                t.set_id,
-                t.artist_id,
-                t.track_title,
-                t.source_text,
-                t.notes,
-                t.first_seen,
-                t.last_seen
-            FROM tracks t
+            SELECT ta.id, ta.set_id, ta.track_id, ta.source_text, ta.notes,
+                   ta.first_seen, ta.last_seen, tc.track_title
+            FROM track_appearances ta
+            JOIN track_catalog tc ON tc.id = ta.track_id
+            ORDER BY ta.id
             """
         ).fetchall()
-        for row in legacy_rows:
-            track_id = get_or_create_track(conn, row["track_title"], now)
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO track_artists (track_id, artist_id, credit_order)
-                VALUES (?, ?, 1)
-                """,
-                (track_id, row["artist_id"]),
+        conn.execute("ALTER TABLE track_catalog RENAME TO track_catalog_old")
+        conn.execute("ALTER TABLE track_artists RENAME TO track_artists_old")
+        conn.execute("ALTER TABLE track_appearances RENAME TO track_appearances_old")
+        conn.execute(
+            """
+            CREATE TABLE track_catalog (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_title TEXT NOT NULL,
+                track_key TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE track_artists (
+                track_id INTEGER NOT NULL,
+                artist_id INTEGER NOT NULL,
+                credit_order INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY(track_id, artist_id),
+                FOREIGN KEY(track_id) REFERENCES track_catalog(id),
+                FOREIGN KEY(artist_id) REFERENCES artists(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE track_appearances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                set_id INTEGER NOT NULL,
+                track_id INTEGER NOT NULL,
+                source_text TEXT,
+                notes TEXT,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                UNIQUE(set_id, track_id),
+                FOREIGN KEY(set_id) REFERENCES sets(id),
+                FOREIGN KEY(track_id) REFERENCES track_catalog(id)
+            )
+            """
+        )
+        for row in rows:
+            artist_rows = conn.execute(
+                """
+                SELECT a.artist_name
+                FROM track_artists_old tr
+                JOIN artists a ON a.id = tr.artist_id
+                WHERE tr.track_id = ?
+                ORDER BY tr.credit_order, a.artist_name
+                """,
+                (row["track_id"],),
+            ).fetchall()
+            artist_names = [artist_row["artist_name"] for artist_row in artist_rows]
+            track_id = get_or_create_track(conn, row["track_title"], row["last_seen"], artist_names)
+            for credit_order, artist_row in enumerate(artist_rows, 1):
+                artist_id = conn.execute(
+                    "SELECT id FROM artists WHERE artist_name = ?", (artist_row["artist_name"],)
+                ).fetchone()[0]
+                conn.execute(
+                    "INSERT OR IGNORE INTO track_artists (track_id, artist_id, credit_order) VALUES (?, ?, ?)",
+                    (track_id, artist_id, credit_order),
+                )
             conn.execute(
                 """
                 INSERT OR IGNORE INTO track_appearances
                     (set_id, track_id, source_text, notes, first_seen, last_seen)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    row["set_id"],
-                    track_id,
-                    row["source_text"] or "",
-                    row["notes"] or "",
-                    row["first_seen"] or now,
-                    row["last_seen"] or now,
-                ),
+                (row["set_id"], track_id, row["source_text"], row["notes"], row["first_seen"], row["last_seen"]),
             )
+        conn.execute("DROP TABLE track_catalog_old")
+        conn.execute("DROP TABLE track_artists_old")
+        conn.execute("DROP TABLE track_appearances_old")
+        conn.execute("INSERT INTO schema_metadata (key, value) VALUES ('track_identity_v2', 'title_and_artists')")
         conn.commit()
 
 
@@ -656,15 +873,20 @@ def append_to_artist_database(
             track_title = (first_entry.get("track_title") or first_entry.get("artist_name") or "").strip()
             source_text = (first_entry.get("source_text") or "").strip()
             notes = (first_entry.get("notes") or "").strip()
-            track_id = get_or_create_track(conn, track_title, now)
             existing_appearance = conn.execute(
-                "SELECT id FROM track_appearances WHERE set_id = ? AND track_id = ?",
-                (set_id, track_id),
+                """
+                SELECT ta.id
+                FROM track_appearances ta
+                JOIN track_catalog tc ON tc.id = ta.track_id
+                WHERE ta.set_id = ? AND tc.track_key = ?
+                """,
+                (set_id, make_track_key(track_title, [entry.get("artist_name", "") for entry in track_entries])),
             ).fetchone()
             if existing_appearance:
                 skipped_duplicates += len(track_entries)
                 continue
 
+            artist_ids = []
             for credit_order, entry in enumerate(track_entries, 1):
                 artist_name = (entry.get("artist_name") or "Unknown artist").strip()
                 handle = (entry.get("handle") or "").strip()
@@ -677,6 +899,14 @@ def append_to_artist_database(
                     location="",
                     source_text=(entry.get("source_text") or "").strip(),
                 )
+                artist_ids.append(artist_id)
+            track_id = get_or_create_track(
+                conn,
+                track_title,
+                now,
+                [entry.get("artist_name", "") for entry in track_entries],
+            )
+            for credit_order, artist_id in enumerate(artist_ids, 1):
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO track_artists (track_id, artist_id, credit_order)
@@ -763,14 +993,25 @@ def parse_soundcloud_line(line: str) -> list[dict]:
     if handles_before_dash:
         artist_name_text = re.sub(pattern, "", pre_dash)
         artist_name_text = re.sub(r"\s+", " ", artist_name_text).strip(" -–—")
+        # Only treat "&" as a collaborator separator when it has spaces on both sides,
+        # so single-artist names like "M&R" aren't split into fake artists "M" and "R".
         artist_names = [
             part.strip()
-            for part in re.split(r"\s*(?:&|,)\s*", artist_name_text)
+            for part in re.split(r"\s*,\s*|\s+&\s+", artist_name_text)
             if part.strip()
         ]
 
+        # When there are fewer handles than names, right-align handles to the
+        # trailing names since a handle always follows the name it belongs to.
+        handle_offset = max(0, len(artist_names) - len(handles_before_dash))
+
         for index, artist_name in enumerate(artist_names):
-            match = handles_before_dash[index] if index < len(handles_before_dash) else None
+            handle_index = index - handle_offset
+            match = (
+                handles_before_dash[handle_index]
+                if 0 <= handle_index < len(handles_before_dash)
+                else None
+            )
             if match is None:
                 handle = ""
                 url = ""
@@ -941,11 +1182,11 @@ def find_best_matches(
     Returns:
         The best-matching reference entry dict, or None if no match meets threshold.
     """
-    name_lower = name.lower().strip()
+    name_lower = strip_accents(name.lower().strip())
     matches: list[dict] = []
 
     for entry in reference_entries:
-        ref_name_lower = entry["name"].lower().strip()
+        ref_name_lower = strip_accents(entry["name"].lower().strip())
 
         score_ratio = fuzz.ratio(name_lower, ref_name_lower)
         score_token_sort = fuzz.token_sort_ratio(name_lower, ref_name_lower)
@@ -1105,15 +1346,18 @@ with tab_match:
     st.caption("One name per line. Numbering and descriptions after a dash are optional.")
 
     st.session_state.setdefault("clear_match_input", False)
+    st.session_state.setdefault("match_upload_version", 0)
     if st.session_state.get("clear_match_input", False):
         st.session_state["input_text"] = ""
-        st.session_state["input_upload"] = None
+        st.session_state["match_upload_version"] += 1
         for key in ["result_tagged", "result_tags", "result_unmatched"]:
             st.session_state.pop(key, None)
         st.session_state["clear_match_input"] = False
 
     input_upload = st.file_uploader(
-        "Upload your list", type=["txt", "csv"], key="input_upload"
+        "Upload your list",
+        type=["txt", "csv"],
+        key=f"input_upload_{st.session_state['match_upload_version']}",
     )
     input_text = st.text_area(
         "Or paste your list here:",
@@ -1227,7 +1471,7 @@ with tab_database:
     entry_date = st.date_input("Date", key="entry_date", format="YYYY-MM-DD")
     radio_show = st.radio(
         "Radio show",
-        ["NO SIGNAL", "ABYSS", "TRACKATHON", "TRACKATHON II"],
+        ["NO SIGNAL", "ABYSS", "TELETHON I", "TELETHON II"],
         key="radio_show",
     )
     pasted_lines = st.text_area(
@@ -1287,7 +1531,7 @@ with tab_database:
         )
         st.caption(
             f"Scanned {dedupe_result['djs']} DJ rows, {dedupe_result['artists']} artist rows, "
-            f"{dedupe_result['sets']} set rows, and {dedupe_result['tracks']} track rows."
+            f"{dedupe_result['sets']} set rows."
         )
 
     st.markdown("---")
@@ -1387,31 +1631,43 @@ with tab_explore:
             summary_cols = st.columns(4)
             summary_cols[0].metric("Total track entries", len(filtered_rows))
             summary_cols[1].metric(
-                "Artists with location",
-                sum(1 for row in filtered_rows if clean_text(row.get("location", ""))),
+                "Unique artists",
+                len({clean_text(row.get("artist_name", "")) for row in filtered_rows if clean_text(row.get("artist_name", ""))}),
             )
             summary_cols[2].metric(
+                "Unique tracks",
+                len({clean_text(row.get("track_title", "")) for row in filtered_rows if clean_text(row.get("track_title", ""))}),
+            )
+            summary_cols[3].metric(
                 "Unique DJs",
                 len({clean_text(row.get("dj_name", "")) for row in filtered_rows if clean_text(row.get("dj_name", ""))}),
             )
-            summary_cols[3].metric(
-                "Most repeated",
-                max((row.get("appearance_count", 0) for row in filtered_rows), default=0),
-            )
 
-            st.markdown("#### Location summary")
-            location_counts = {}
+            # Top 10 Artists
+            st.markdown("#### Top 10 Artists Played")
+            artist_counts = {}
             for row in filtered_rows:
-                location = clean_text(row.get("location", "")) or "Unknown"
-                location_counts[location] = location_counts.get(location, 0) + 1
+                artist = clean_text(row.get("artist_name", "")) or "Unknown"
+                artist_counts[artist] = artist_counts.get(artist, 0) + 1
 
-            location_summary = sorted(location_counts.items(), key=lambda item: (-item[1], item[0]))
+            top_artists = sorted(artist_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+            for i, (artist, count) in enumerate(top_artists, 1):
+                st.write(f"**{i}. {artist}** — {count} appearance{'s' if count != 1 else ''}")
 
-            col_location = st.columns(1)[0]
-            with col_location:
-                st.write("**Locations**")
-                for location, count in location_summary[:20]:
-                    st.write(f"- {location}: {count}")
+            # Top 10 Tracks
+            st.markdown("#### Top 10 Tracks Played")
+            track_counts = {}
+            for row in filtered_rows:
+                artist = clean_text(row.get("artist_name", "")) or "Unknown"
+                track = clean_text(row.get("track_title", "")) or "Unknown"
+                # Skip untitled tracks for this display
+                if "untitled" not in track.lower():
+                    key = f"{artist} – {track}"
+                    track_counts[key] = track_counts.get(key, 0) + 1
+
+            top_tracks = sorted(track_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+            for i, (track_label, count) in enumerate(top_tracks, 1):
+                st.write(f"**{i}. {track_label}** — {count} appearance{'s' if count != 1 else ''}")
 
 
 # =============================================================================
