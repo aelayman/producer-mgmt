@@ -37,6 +37,7 @@ The app has four tabs:
 ### Tab 2: Build Artist Database
 
 - Import SoundCloud-style track lines with DJ, set number, date, and show context
+- Preview parsed lines and warnings before saving an import
 - Keep repeated appearances when the same track is played in different sets
 - Store each track once, link it to every credited artist, and record each set appearance separately
 - Use **Dedupe database** to merge duplicate records; this also runs automatically when the app loads

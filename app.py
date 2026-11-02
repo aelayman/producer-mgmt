@@ -1122,6 +1122,38 @@ def parse_soundcloud_line(line: str) -> list[dict]:
     return artist_entries
 
 
+def build_import_preview(lines: list[str]) -> dict[str, object]:
+    """Parse import lines without writing to the database."""
+    parsed_rows: list[dict] = []
+    warnings: list[str] = []
+    non_comment_lines = 0
+    parsed_line_count = 0
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        non_comment_lines += 1
+        entries = parse_soundcloud_line(line)
+        if not entries:
+            warnings.append(f"Could not parse: {line}")
+            continue
+
+        parsed_line_count += 1
+        parsed_rows.extend(entries)
+        if not any(entry.get("track_title", "").strip() for entry in entries):
+            warnings.append(
+                f"No track title found; the artist name will be used as the title: {line}"
+            )
+
+    return {
+        "parsed_rows": parsed_rows,
+        "warnings": warnings,
+        "non_comment_lines": non_comment_lines,
+        "parsed_line_count": parsed_line_count,
+    }
+
+
 # =============================================================================
 # PARSING FUNCTIONS
 # These extract structured data from raw text input.
@@ -1538,6 +1570,7 @@ with tab_database:
         st.session_state["set_number"] = ""
         st.session_state["entry_date"] = date.today()
         st.session_state["radio_show"] = "NO SIGNAL"
+        st.session_state.pop("import_preview", None)
         st.session_state["clear_bulk_input"] = False
 
     dj_name = st.text_input("DJ name", key="dj_name")
@@ -1555,16 +1588,16 @@ with tab_database:
         placeholder="1. Mor Elian @[morelian](https://soundcloud.com/morelian) - Swerving Mantis\n2. Gobekli @[gobekli](https://soundcloud.com/gobekli) - Edfu Texts (Ronan Remix) @[ronan-music](https://soundcloud.com/ronan-music)",
     )
 
-    import_col, clear_col = st.columns(2)
-    paste_import = import_col.button("📥 Paste and import", use_container_width=True, type="primary")
+    preview_col, clear_col = st.columns(2)
+    preview_import = preview_col.button("🔎 Preview import", use_container_width=True, type="primary")
     clear = clear_col.button("🧹 Clear input", use_container_width=True)
 
     if clear:
-        if st.session_state.get("bulk_lines", "").strip():
+        if st.session_state.get("bulk_lines", "").strip() or st.session_state.get("import_preview"):
             st.session_state["clear_bulk_input"] = True
             st.rerun()
 
-    if paste_import:
+    if preview_import:
         if not dj_name.strip():
             st.error("Please enter a DJ name.")
         else:
@@ -1572,31 +1605,104 @@ with tab_database:
             if not lines:
                 st.error("Paste at least one line to import.")
             else:
-                set_date_value = entry_date.isoformat() if isinstance(entry_date, date) else str(entry_date)
-                with get_db_connection() as conn:
-                    existing_set = find_existing_set(conn, dj_name.strip(), set_number.strip(), set_date_value, radio_show)
-
-                if existing_set:
-                    st.warning("This DJ/set already exists in the database. Import skipped to avoid duplicate track entries.")
+                preview = build_import_preview(lines)
+                parsed_rows = preview["parsed_rows"]
+                if not parsed_rows:
+                    st.warning("No valid entries were found in the pasted text.")
                 else:
-                    parsed_rows = []
-                    for line in lines:
-                        parsed_rows.extend(parse_soundcloud_line(line))
+                    st.session_state["import_preview"] = {
+                        **preview,
+                        "dj_name": dj_name.strip(),
+                        "set_number": set_number.strip(),
+                        "set_date": entry_date.isoformat() if isinstance(entry_date, date) else str(entry_date),
+                        "radio_show": radio_show,
+                        "source_text": pasted_lines,
+                    }
 
-                    if parsed_rows:
-                        import_result = append_to_artist_database(
-                            parsed_rows,
-                            dj_name=dj_name.strip(),
-                            set_number=set_number.strip(),
-                            set_date=set_date_value,
-                            radio_show=radio_show,
-                        )
-                        st.success(
-                            f"✅ Parsed {len(lines)} line(s); created {import_result['created']} track appearance(s); skipped {import_result['skipped_duplicates']} duplicate artist credit(s)."
-                        )
-                        st.dataframe(load_artist_database(), use_container_width=True, hide_index=True)
-                    else:
-                        st.warning("No valid entries were found in the pasted text.")
+    preview = st.session_state.get("import_preview")
+    if preview:
+        preview_rows = preview["parsed_rows"]
+        preview_warnings = preview["warnings"]
+        preview_context = {
+            "dj_name": dj_name.strip(),
+            "set_number": set_number.strip(),
+            "set_date": entry_date.isoformat() if isinstance(entry_date, date) else str(entry_date),
+            "radio_show": radio_show,
+            "source_text": pasted_lines,
+        }
+        context_changed = any(
+            preview.get(key) != value for key, value in preview_context.items()
+        )
+
+        st.markdown("#### Import preview")
+        st.caption(
+            f"Parsed {preview['parsed_line_count']} of {preview['non_comment_lines']} "
+            f"non-comment line(s) into {len(preview_rows)} artist credit row(s)."
+        )
+        if preview_warnings:
+            st.warning("Some lines need attention. They will not be imported unless they appear in the preview below.")
+            st.dataframe(
+                [{"Warning": warning} for warning in preview_warnings],
+                use_container_width=True,
+                hide_index=True,
+            )
+        st.dataframe(
+            [
+                {
+                    "Artist": row.get("artist_name", ""),
+                    "Handle": row.get("handle", ""),
+                    "Track": row.get("track_title", "") or "(artist name used as title)",
+                    "Source": row.get("source_text", ""),
+                }
+                for row in preview_rows
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        if context_changed:
+            st.info("The DJ, set details, or pasted text changed. Preview the import again before saving.")
+
+        confirm_col, cancel_col = st.columns(2)
+        confirm_import = confirm_col.button(
+            "✅ Confirm and save",
+            use_container_width=True,
+            type="primary",
+            disabled=context_changed,
+        )
+        cancel_import = cancel_col.button("Cancel preview", use_container_width=True)
+
+        if cancel_import:
+            st.session_state.pop("import_preview", None)
+            st.rerun()
+
+        if confirm_import:
+            set_date_value = preview["set_date"]
+            with get_db_connection() as conn:
+                existing_set = find_existing_set(
+                    conn,
+                    preview["dj_name"],
+                    preview["set_number"],
+                    set_date_value,
+                    preview["radio_show"],
+                )
+
+            if existing_set:
+                st.warning("This DJ/set already exists in the database. Import skipped to avoid duplicate track entries.")
+            else:
+                import_result = append_to_artist_database(
+                    preview_rows,
+                    dj_name=preview["dj_name"],
+                    set_number=preview["set_number"],
+                    set_date=set_date_value,
+                    radio_show=preview["radio_show"],
+                )
+                st.session_state.pop("import_preview", None)
+                st.success(
+                    f"✅ Created {import_result['created']} track appearance(s); "
+                    f"skipped {import_result['skipped_duplicates']} duplicate artist credit(s)."
+                )
+                st.dataframe(load_artist_database(), use_container_width=True, hide_index=True)
 
     if st.button("🧹 Dedupe database", use_container_width=True):
         dedupe_result = dedupe_artist_database()

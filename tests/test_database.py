@@ -17,6 +17,21 @@ class DatabaseTests(unittest.TestCase):
         app.ARTIST_DATABASE_PATH = self.original_database_path
         self.temp_directory.cleanup()
 
+    def test_import_preview_parses_without_writing(self) -> None:
+        preview = app.build_import_preview(
+            [
+                "# comment",
+                "Artist One @[artistone](https://soundcloud.com/artistone) - Preview Track",
+                "Artist Without A Title",
+            ]
+        )
+
+        self.assertEqual(preview["non_comment_lines"], 2)
+        self.assertEqual(preview["parsed_line_count"], 2)
+        self.assertEqual(len(preview["parsed_rows"]), 2)
+        self.assertEqual(len(preview["warnings"]), 1)
+        self.assertFalse(self.database_path.exists())
+
     def test_import_creates_normalized_records_and_skips_duplicate_set(self) -> None:
         entries = [
             {
