@@ -1899,7 +1899,7 @@ with tab_database:
     entry_date = st.date_input("Date", key="entry_date", format="YYYY-MM-DD")
     radio_show = st.radio(
         "Radio show",
-        ["NO SIGNAL", "ABYSS", "TELETHON I", "TELETHON II"],
+        ["NO SIGNAL", "ABYSS", "TELETHON I", "TELETHON II", "TELETHON III"],
         key="radio_show",
     )
     pasted_lines = st.text_area(

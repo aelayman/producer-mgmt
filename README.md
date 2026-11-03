@@ -48,6 +48,7 @@ The app has four tabs:
 - Import SoundCloud-style track lines with DJ, set number, date, and show context
 - Preview parsed lines and warnings before saving an import
 - Paste a completed tagged list to bulk-fill missing artist handles and URLs
+- Use `TELETHON III` for the third Telethon; name its sets `T3-1`, `T3-2`, and so on
 - Undo the latest confirmed import without deleting shared artists or tracks
 - Keep repeated appearances when the same track is played in different sets
 - Store each track once, link it to every credited artist, and record each set appearance separately
