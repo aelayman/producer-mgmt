@@ -1266,7 +1266,7 @@ def parse_soundcloud_line(line: str) -> list[dict]:
         # so single-artist names like "M&R" aren't split into fake artists "M" and "R".
         artist_names = [
             part.strip()
-            for part in re.split(r"\s*,\s*|\s+&\s+", artist_name_text)
+            for part in re.split(r"\s*,\s*|\s+&\s+|\s+\+\s+", artist_name_text)
             if part.strip()
         ]
 

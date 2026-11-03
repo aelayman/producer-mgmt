@@ -32,6 +32,22 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(len(preview["warnings"]), 1)
         self.assertFalse(self.database_path.exists())
 
+    def test_import_preview_captures_plus_separated_artists(self) -> None:
+        rows = app.parse_soundcloud_line(
+            "30. Kali Malone + Drew McDowall "
+            "@kali-malone @drewmcdowall – A Sound That Is Alive"
+        )
+
+        self.assertEqual([row["artist_name"] for row in rows], ["Kali Malone", "Drew McDowall"])
+        self.assertEqual(
+            [row["handle"] for row in rows],
+            ["kali-malone", "drewmcdowall"],
+        )
+        self.assertEqual(
+            [row["track_title"] for row in rows],
+            ["A Sound That Is Alive", "A Sound That Is Alive"],
+        )
+
     def test_import_creates_normalized_records_and_skips_duplicate_set(self) -> None:
         entries = [
             {
