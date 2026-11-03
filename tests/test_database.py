@@ -48,6 +48,34 @@ class DatabaseTests(unittest.TestCase):
             ["A Sound That Is Alive", "A Sound That Is Alive"],
         )
 
+    def test_completed_list_bulk_updates_missing_artist_profile_fields(self) -> None:
+        app.append_to_artist_database(
+            [{"artist_name": "Research Artist", "track_title": "Research Track"}],
+            dj_name="Research DJ",
+            set_number="1",
+            set_date="2026-01-09",
+        )
+
+        entries = [
+            {
+                "artist_name": "Research Artist",
+                "handle": "@researchartist",
+                "url": "https://soundcloud.com/researchartist",
+            }
+        ]
+        self.assertEqual(
+            app.preview_artist_profile_updates(entries),
+            {"handles": 1, "urls": 1, "conflicts": 0},
+        )
+        self.assertEqual(
+            app.update_existing_artist_profiles(entries),
+            {"handles": 1, "urls": 1},
+        )
+        self.assertEqual(
+            app.update_existing_artist_profiles(entries),
+            {"handles": 0, "urls": 0},
+        )
+
     def test_import_creates_normalized_records_and_skips_duplicate_set(self) -> None:
         entries = [
             {

@@ -1101,6 +1101,100 @@ def export_artist_history_csv(history: list[dict]) -> str:
     return output.getvalue()
 
 
+def merge_artist_profile_entries(entries: list[dict]) -> list[dict]:
+    """Combine repeated artist rows so profile updates are applied once per artist."""
+    merged: dict[str, dict] = {}
+    for entry in entries:
+        artist_name = clean_text(entry.get("artist_name", "")).strip() or "Unknown artist"
+        key = normalize_lookup_text(artist_name)
+        if key not in merged:
+            merged[key] = {
+                "artist_name": artist_name,
+                "handle": "",
+                "url": "",
+                "source_text": entry.get("source_text", ""),
+            }
+        if entry.get("handle") and not merged[key]["handle"]:
+            merged[key]["handle"] = entry["handle"]
+        if entry.get("url") and not merged[key]["url"]:
+            merged[key]["url"] = entry["url"]
+    return list(merged.values())
+
+
+def preview_artist_profile_updates(entries: list[dict]) -> dict[str, int]:
+    """Summarize missing artist profile fields that a completed list can add."""
+    if not entries:
+        return {"handles": 0, "urls": 0, "conflicts": 0}
+
+    init_artist_database()
+    handles = urls = conflicts = 0
+    with get_db_connection() as conn:
+        for entry in merge_artist_profile_entries(entries):
+            incoming_handle = normalize_artist_handle(entry["handle"])
+            incoming_url = clean_text(entry["url"]).strip().lower()
+            existing = conn.execute(
+                "SELECT handle, url FROM artists WHERE artist_name = ?",
+                (entry["artist_name"],),
+            ).fetchone()
+            if not existing:
+                continue
+            if incoming_handle and not existing["handle"]:
+                handles += 1
+            elif incoming_handle and existing["handle"] != incoming_handle:
+                conflicts += 1
+            if incoming_url and not existing["url"]:
+                urls += 1
+            elif incoming_url and existing["url"] != incoming_url:
+                conflicts += 1
+    return {"handles": handles, "urls": urls, "conflicts": conflicts}
+
+
+def update_existing_artist_profiles(entries: list[dict]) -> dict[str, int]:
+    """Bulk-fill missing artist handles and URLs from a completed tagged list."""
+    if not entries:
+        return {"handles": 0, "urls": 0}
+
+    init_artist_database()
+    handles = urls = 0
+    with get_db_connection() as conn:
+        for entry in merge_artist_profile_entries(entries):
+            existing = conn.execute(
+                "SELECT id, handle, url FROM artists WHERE artist_name = ?",
+                (entry["artist_name"],),
+            ).fetchone()
+            if not existing:
+                continue
+
+            incoming_handle = normalize_artist_handle(entry["handle"])
+            incoming_url = clean_text(entry["url"]).strip().lower()
+            if incoming_handle and not existing["handle"]:
+                conn.execute(
+                    "UPDATE artists SET handle = ? WHERE id = ?",
+                    (incoming_handle, existing["id"]),
+                )
+                handles += 1
+            if incoming_url and not existing["url"]:
+                conn.execute(
+                    "UPDATE artists SET url = ? WHERE id = ?",
+                    (incoming_url, existing["id"]),
+                )
+                urls += 1
+            if (
+                (incoming_handle and existing["handle"] and incoming_handle != existing["handle"])
+                or (incoming_url and existing["url"] and incoming_url != existing["url"])
+            ):
+                record_artist_handle_conflict(
+                    conn,
+                    existing["id"],
+                    entry["artist_name"],
+                    incoming_handle,
+                    incoming_url,
+                    entry.get("source_text", ""),
+                )
+        conn.commit()
+    return {"handles": handles, "urls": urls}
+
+
 def append_to_artist_database(
     entries: list[dict],
     dj_name: str = "",
@@ -1844,6 +1938,7 @@ with tab_database:
                         "set_date": entry_date.isoformat() if isinstance(entry_date, date) else str(entry_date),
                         "radio_show": radio_show,
                         "source_text": pasted_lines,
+                        "profile_updates": preview_artist_profile_updates(parsed_rows),
                     }
 
     preview = st.session_state.get("import_preview")
@@ -1873,6 +1968,18 @@ with tab_database:
                 use_container_width=True,
                 hide_index=True,
             )
+            profile_updates = preview.get("profile_updates", {})
+            if profile_updates.get("handles") or profile_updates.get("urls"):
+                st.info(
+                    "This completed list will bulk-update "
+                    f"{profile_updates.get('handles', 0)} missing handle(s) and "
+                    f"{profile_updates.get('urls', 0)} missing URL(s)."
+                )
+            if profile_updates.get("conflicts"):
+                st.warning(
+                    f"{profile_updates['conflicts']} existing profile value(s) differ from this list "
+                    "and will not be overwritten."
+                )
         st.dataframe(
             [
                 {
@@ -1905,6 +2012,7 @@ with tab_database:
 
         if confirm_import:
             set_date_value = preview["set_date"]
+            profile_updates = update_existing_artist_profiles(preview_rows)
             with get_db_connection() as conn:
                 existing_set = find_existing_set(
                     conn,
@@ -1915,7 +2023,15 @@ with tab_database:
                 )
 
             if existing_set:
-                st.warning("This DJ/set already exists in the database. Import skipped to avoid duplicate track entries.")
+                st.warning(
+                    "This DJ/set already exists in the database. Import skipped to avoid "
+                    "duplicate track entries."
+                )
+                if profile_updates["handles"] or profile_updates["urls"]:
+                    st.info(
+                        f"Updated {profile_updates['handles']} artist handle(s) and "
+                        f"{profile_updates['urls']} artist URL(s) from the completed list."
+                    )
             else:
                 import_result = append_to_artist_database(
                     preview_rows,
@@ -1927,7 +2043,8 @@ with tab_database:
                 st.session_state.pop("import_preview", None)
                 st.success(
                     f"✅ Created {import_result['created']} track appearance(s); "
-                    f"skipped {import_result['skipped_duplicates']} duplicate artist credit(s)."
+                    f"updated {profile_updates['handles']} artist handle(s) and "
+                    f"{profile_updates['urls']} artist URL(s)."
                 )
                 st.dataframe(load_artist_database(), use_container_width=True, hide_index=True)
 
