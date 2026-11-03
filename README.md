@@ -51,7 +51,6 @@ The app has four tabs:
 - Keep repeated appearances when the same track is played in different sets
 - Store each track once, link it to every credited artist, and record each set appearance separately
 - Use **Dedupe database** to merge duplicate records; this also runs automatically when the app loads
-- Review conflicting handles in the Explore Database tab
 
 The database uses separate tables for DJs, sets, artists, unique tracks, artist credits, and set appearances. A track is stored once in the catalog and can appear in many DJ sets.
 
@@ -59,38 +58,18 @@ The **Database health and backups** section in the Build Artist Database tab sho
 
 Imports made after the undo feature was added can be reversed from the same section. Older imports are not assigned an undo record and are left unchanged.
 
-### Tab 3: Explore Artist Database
+### Tab 4: Explore Artist Database
 
 - Search and summarize artists, tracks, DJs, sets, and locations
 - Browse DJ sets by DJ, radio show, set number, or date and inspect an individual tracklist
 - Edit DJ, set number, date, and radio show metadata without re-importing tracks
-- Review conflicting handles preserved during deduplication
-
-### Tab 4: Manage Master List
-
-This is where you view and grow your master reference list over time.
-
-- **View** all current entries in a searchable table
-- **Add** new entries by pasting or uploading (one per line, must include an @ handle)
-- **View raw file** contents in an expandable section
-
-### Master Reference List (`master_reference_list.txt`)
-
-This file is the heart of the tool — it stores all known names and their @ handles.
-
-**Format** — one entry per line:
-```
-Fred Jones @fredejones – Dynamics presentation
-Jane Smith @jsmith – Power Platform demo
-```
-
-**Two ways to add entries:**
-1. Edit `master_reference_list.txt` directly in any text editor
-2. Use the **Manage Master List** tab in the app
+- Review and edit conflicting artist handles and URLs
 
 ## Match Sensitivity
 
 Use the sidebar slider to adjust how strict the matching is (default 82/100). Higher = stricter. If you're getting false matches, increase it. If names aren't matching when they should, decrease it.
+
+To stop the local Streamlit server, use **Control+C** in the terminal running it. If Streamlit asks whether to clear the cache, answer `n`; that prompt is about stopping the server, not editing the app.
 
 ## Development checks
 

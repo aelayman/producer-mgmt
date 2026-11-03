@@ -201,6 +201,47 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(updated["radio_show"], "ABYSS")
         self.assertEqual(updated["track_count"], 1)
 
+    def test_artist_handle_conflict_can_be_resolved(self) -> None:
+        app.init_artist_database()
+        with app.get_db_connection() as connection:
+            artist_id = connection.execute(
+                "INSERT INTO artists (artist_name, handle, url) VALUES (?, ?, ?)",
+                ("Conflict Artist", "original", "https://soundcloud.com/original"),
+            ).lastrowid
+            conflict_id = connection.execute(
+                """
+                INSERT INTO artist_handle_conflicts
+                    (artist_id, artist_name, handle, url, source_text, created_at)
+                VALUES (?, ?, ?, ?, ?, datetime('now'))
+                """,
+                (
+                    artist_id,
+                    "Conflict Artist",
+                    "edited",
+                    "https://soundcloud.com/edited",
+                    "Conflict Artist @[edited](https://soundcloud.com/edited)",
+                ),
+            ).lastrowid
+            connection.commit()
+
+        app.resolve_artist_handle_conflict(
+            conflict_id,
+            artist_id,
+            "@edited",
+            "HTTPS://SoundCloud.com/Edited",
+        )
+
+        with app.get_db_connection() as connection:
+            artist = connection.execute(
+                "SELECT handle, url FROM artists WHERE id = ?", (artist_id,)
+            ).fetchone()
+            remaining_conflicts = connection.execute(
+                "SELECT COUNT(*) FROM artist_handle_conflicts"
+            ).fetchone()[0]
+
+        self.assertEqual(tuple(artist), ("edited", "https://soundcloud.com/edited"))
+        self.assertEqual(remaining_conflicts, 0)
+
     def test_artist_lookup_returns_ranked_profile_and_history(self) -> None:
         app.append_to_artist_database(
             [

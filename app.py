@@ -1,38 +1,4 @@
-"""
-Identify Existing Tags
------------------------
-A tool that matches names from your list against a MASTER REFERENCE LIST
-containing @ handles, then returns your list with tags inserted
-plus a deduplicated list of all matched tags.
-
-MASTER LIST:
-- Stored in 'master_reference_list.txt' in the same folder as this script
-- Loaded automatically every time the app runs — no need to paste it each time
-- You can grow it over time by:
-    (a) Editing the file directly in any text editor
-    (b) Using the "Manage Master List" tab in the web UI
-- Format: one entry per line, e.g. "Fred Jones @fredejones – Dynamics presentation"
-
-OVERVIEW OF HOW THIS WORKS:
-1. The app loads your master list from 'master_reference_list.txt' automatically.
-
-2. You provide a "new list" — your own list of names WITHOUT @ handles. Example:
-       1. Fred Jones – Supply Chain Demo
-
-3. The tool compares each name in your new list against all names in the
-   master list using fuzzy matching (so minor typos/variations still work).
-   When it finds a match, it grabs the @ handle from the master list.
-
-4. Output:
-   - Your list re-numbered with the @ handle inserted after each matched name
-   - A separate deduplicated list of just the unique @ handles found
-
-ADJUSTING THE MATCHING:
-- The "threshold" (default 82 out of 100) controls how strict matching is.
-- Higher threshold = names must be more similar to count as a match.
-- Lower threshold = more lenient, but risks false positives.
-- The slider in the web UI lets you tune this in real time.
-"""
+"""Streamlit app for importing, browsing, and maintaining DJ set data."""
 
 import csv
 import re
@@ -46,52 +12,7 @@ import streamlit as st
 from thefuzz import fuzz  # fuzzy string matching library (uses Levenshtein distance)
 
 
-# =============================================================================
-# MASTER LIST FILE PATH
-# This is the persistent file where all known names + @ handles are stored.
-# The app reads from this file automatically. You can also edit it by hand.
-# It lives in the same folder as this script.
-# =============================================================================
-MASTER_LIST_PATH = Path(__file__).parent / "master_reference_list.txt"
 ARTIST_DATABASE_PATH = Path(__file__).parent / "artist_database.db"
-
-
-def load_master_list() -> str:
-    """
-    Load the master reference list from disk.
-    Returns the file contents as a string, or empty string if file doesn't exist.
-    """
-    if MASTER_LIST_PATH.exists():
-        return MASTER_LIST_PATH.read_text(encoding="utf-8")
-    return ""
-
-
-def append_to_master_list(new_entries: str) -> int:
-    """
-    Append new entries to the master reference list file.
-    Adds a blank line separator before the new content if the file isn't empty.
-
-    Args:
-        new_entries: Raw text with new entries (one per line)
-
-    Returns:
-        Number of valid entries (lines with @ handles) that were added.
-    """
-    # Count how many valid lines are being added (must contain an @ handle)
-    valid_count = sum(
-        1 for line in new_entries.strip().splitlines()
-        if line.strip() and "@" in line and not line.strip().startswith("#")
-    )
-
-    # Append to the file
-    with open(MASTER_LIST_PATH, "a", encoding="utf-8") as f:
-        # Add a newline separator if the file already has content
-        existing = MASTER_LIST_PATH.read_text(encoding="utf-8") if MASTER_LIST_PATH.exists() else ""
-        if existing and not existing.endswith("\n"):
-            f.write("\n")
-        f.write(new_entries.strip() + "\n")
-
-    return valid_count
 
 
 def get_db_connection() -> sqlite3.Connection:
@@ -918,12 +839,45 @@ def load_artist_handle_conflicts() -> list[dict]:
     with get_db_connection() as conn:
         rows = conn.execute(
             """
-            SELECT artist_name, handle, url, source_text, created_at
+            SELECT id, artist_id, artist_name, handle, url, source_text, created_at
             FROM artist_handle_conflicts
             ORDER BY artist_name, created_at
             """
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def resolve_artist_handle_conflict(
+    conflict_id: int,
+    artist_id: int,
+    handle: str,
+    url: str,
+) -> None:
+    """Make an edited conflict the artist's primary profile and remove the conflict."""
+    handle = normalize_artist_handle(handle)
+    url = clean_text(url).strip().lower()
+    init_artist_database()
+    with get_db_connection() as conn:
+        conflict = conn.execute(
+            """
+            SELECT id
+            FROM artist_handle_conflicts
+            WHERE id = ? AND artist_id = ?
+            """,
+            (conflict_id, artist_id),
+        ).fetchone()
+        if not conflict:
+            raise ValueError("That conflict no longer exists. Refresh the page and try again.")
+
+        conn.execute(
+            "UPDATE artists SET handle = ?, url = ? WHERE id = ?",
+            (handle, url, artist_id),
+        )
+        conn.execute(
+            "DELETE FROM artist_handle_conflicts WHERE id = ?",
+            (conflict_id,),
+        )
+        conn.commit()
 
 
 def load_normalized_database_tables() -> dict[str, list[dict]]:
@@ -1395,59 +1349,6 @@ def build_import_preview(lines: list[str]) -> dict[str, object]:
     }
 
 
-# =============================================================================
-# PARSING FUNCTIONS
-# These extract structured data from raw text input.
-# =============================================================================
-
-
-def parse_reference_list(text: str) -> list[dict]:
-    """
-    Parse the reference list to extract names and their @ handles.
-
-    Expected input format (one entry per line):
-        28. Fred Jones @fredejones – Dynamics presentation.
-        29. Jane Smith @jsmith – Power Platform demo.
-
-    The number at the start is optional. The @ handle can appear anywhere
-    in the line. The name is extracted as everything BEFORE the @ handle.
-
-    Returns:
-        List of dicts, each with:
-        - 'name': the person's name (e.g. "Fred Jones")
-        - 'handle': their @ tag (e.g. "@fredejones")
-    """
-    entries = []
-    for line in text.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue  # skip blank lines
-
-        # Strip leading numbering like "28." or "28)" so we're left with just the content
-        line_cleaned = re.sub(r"^\d+[\.\)]\s*", "", line)
-
-        # Look for an @ handle — matches @ followed by word characters, dots, or hyphens
-        # Examples: @fredejones, @jane.smith, @some-user
-        handle_match = re.search(r"@([\w\.\-]+)", line_cleaned)
-        if not handle_match:
-            continue  # no @ handle found on this line, skip it
-
-        handle = handle_match.group(0)  # the full handle including the @ symbol
-
-        # Everything before the @ handle is treated as the person's name
-        name_part = line_cleaned[: handle_match.start()].strip()
-
-        # Remove any trailing dashes/spaces that might be left over
-        # (e.g. "Fred Jones – " becomes "Fred Jones")
-        name_part = re.sub(r"[\s\-–—]+$", "", name_part).strip()
-
-        # Only add if we got both a name and a handle
-        if name_part and handle:
-            entries.append({"name": name_part, "handle": handle})
-
-    return entries
-
-
 def load_reference_entries_from_db() -> list[dict]:
     """Load all artists from SQLite so missing handles can be flagged during matching."""
     init_artist_database()
@@ -1636,7 +1537,7 @@ def process_lists(reference_entries: list[dict], input_text: str, threshold: int
 st.set_page_config(page_title="Identify Existing Tags", page_icon="🏷️", layout="wide")
 st.title("🏷️ Identify Existing Tags")
 st.markdown(
-    "Match names from your list against a master reference list to find existing @ handles."
+    "Match names from your list against the artist database to find existing @ handles."
 )
 
 # --- SIDEBAR: Settings and instructions ---
@@ -1652,28 +1553,22 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Show the master list file location so the user knows where it lives
-    st.markdown("**Master list file:**")
-    st.code(str(MASTER_LIST_PATH), language=None)
-
-    master_text = load_master_list()
-    master_entries = parse_reference_list(master_text)
     db_reference_entries = load_reference_entries_from_db()
     st.metric("Artists in database", len(db_reference_entries))
 
     st.markdown("---")
     st.markdown(
         "**How it works:**\n"
-        "1. Your master list is loaded automatically from `master_reference_list.txt`\n"
+        "1. Artist names and handles come from the SQLite database\n"
         "2. Use **Find Tags** tab to match names\n"
         "3. Use **Artist Lookup** to find one artist and their SoundCloud details\n"
-        "4. Use **Manage Master List** tab to view/add entries"
+        "4. Use **Build Artist Database** to import new tracklists"
     )
 
 
-# --- FIVE TABS: matching, lookup, database import, database explorer, and master list management ---
-tab_match, tab_lookup, tab_database, tab_explore, tab_manage = st.tabs(
-    ["🔍 Find Tags", "🎧 Artist Lookup", "🎵 Build Artist Database", "🧭 Explore Database", "📋 Manage Master List"]
+# --- FOUR TABS: matching, lookup, database import, and database explorer ---
+tab_match, tab_lookup, tab_database, tab_explore = st.tabs(
+    ["🔍 Find Tags", "🎧 Artist Lookup", "🎵 Build Artist Database", "🧭 Explore Database"]
 )
 
 
@@ -1681,7 +1576,7 @@ tab_match, tab_lookup, tab_database, tab_explore, tab_manage = st.tabs(
 # TAB 1: FIND TAGS (main matching function)
 # =============================================================================
 with tab_match:
-    st.subheader("Match your list against the master reference list")
+    st.subheader("Match your list against the artist database")
 
     # Show a note about the master list being loaded automatically
     if db_reference_entries:
@@ -2127,20 +2022,52 @@ with tab_explore:
     normalized_tables = load_normalized_database_tables()
     set_summaries = load_set_summaries()
     if conflict_rows:
-        st.warning(f"{len(conflict_rows)} conflicting handle(s) were preserved for review.")
-        st.dataframe(
-            [
-                {
-                    "Artist": clean_text(row.get("artist_name", "")),
-                    "Conflicting handle": clean_text(row.get("handle", "")),
-                    "URL": clean_text(row.get("url", "")),
-                    "Source": clean_text(row.get("source_text", "")),
-                }
-                for row in conflict_rows
-            ],
-            use_container_width=True,
-            hide_index=True,
+        st.warning(f"{len(conflict_rows)} conflicting handle(s) are available to review.")
+        conflict_options = {
+            row["id"]: (
+                f"{row['artist_name']} · "
+                f"{format_artist_handle(row.get('handle')) or 'no handle'}"
+            )
+            for row in conflict_rows
+        }
+        selected_conflict_id = st.selectbox(
+            "Choose a conflict to edit",
+            list(conflict_options),
+            format_func=lambda conflict_id: conflict_options[conflict_id],
+            key="selected_conflict_id",
         )
+        selected_conflict = next(
+            row for row in conflict_rows if row["id"] == selected_conflict_id
+        )
+        st.caption(
+            f"Original source: {selected_conflict.get('source_text') or 'Not recorded'}"
+        )
+        with st.form("resolve_artist_handle_conflict"):
+            edited_conflict_handle = st.text_input(
+                "Handle",
+                value=format_artist_handle(selected_conflict.get("handle")),
+            )
+            edited_conflict_url = st.text_input(
+                "SoundCloud URL",
+                value=selected_conflict.get("url") or "",
+            )
+            resolve_conflict = st.form_submit_button("Save as primary artist profile")
+
+        if resolve_conflict:
+            try:
+                resolve_artist_handle_conflict(
+                    selected_conflict["id"],
+                    selected_conflict["artist_id"],
+                    edited_conflict_handle,
+                    edited_conflict_url,
+                )
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.success(
+                    f"Updated {selected_conflict['artist_name']} and cleared the conflict."
+                )
+                st.rerun()
 
     st.markdown("#### Database tables")
     table_artists, table_tracks, table_credits, table_appearances, table_sets = st.tabs(
@@ -2346,78 +2273,3 @@ with tab_explore:
             top_tracks = sorted(track_counts.items(), key=lambda item: (-item[1], item[0]))[:10]
             for i, (track_label, count) in enumerate(top_tracks, 1):
                 st.write(f"**{i}. {track_label}** — {count} appearance{'s' if count != 1 else ''}")
-
-
-# =============================================================================
-# TAB 5: MANAGE MASTER LIST
-# Lets the user view the current master list, add new entries, or bulk-paste
-# a whole new batch. Changes are saved to master_reference_list.txt.
-# =============================================================================
-with tab_manage:
-    st.subheader("View & grow your master reference list")
-    st.markdown(
-        "This is the file the app matches against: `master_reference_list.txt`. "
-        "You can add entries here or edit the file directly in any text editor."
-    )
-
-    # --- VIEW CURRENT ENTRIES ---
-    st.markdown("#### Current entries")
-    if master_entries:
-        # Show a clean table of all current name/handle pairs
-        st.dataframe(
-            [{"Name": e["name"], "Handle": e["handle"]} for e in master_entries],
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.info("No entries yet. Add some below!")
-
-    st.markdown("---")
-
-    # --- ADD NEW ENTRIES ---
-    # Two options: paste a batch of entries, or upload a file
-    st.markdown("#### Add new entries")
-    st.caption(
-        "Paste entries below — one per line, each must include a name and an @ handle. "
-        "Format: `Name @handle – optional description`"
-    )
-
-    new_entries_upload = st.file_uploader(
-        "Upload a file with new entries", type=["txt", "csv"], key="new_entries_upload"
-    )
-    new_entries_text = st.text_area(
-        "Or paste new entries here:",
-        height=200,
-        placeholder="Fred Jones @fredejones – Dynamics presentation\nJane Smith @jsmith – Power Platform demo\n...",
-        key="new_entries_text",
-    )
-
-    if new_entries_upload:
-        new_entries_text = new_entries_upload.read().decode("utf-8", errors="replace")
-        st.text_area("Uploaded content (preview):", new_entries_text[:2000], height=150, disabled=True)
-
-    if st.button("➕ Add to Master List", type="primary", use_container_width=True):
-        if not new_entries_text or not new_entries_text.strip():
-            st.error("Please provide entries to add.")
-        elif "@" not in new_entries_text:
-            st.error("No @ handles found. Each entry must include an @ handle (e.g. `@fredejones`).")
-        else:
-            count = append_to_master_list(new_entries_text)
-            if count > 0:
-                st.success(f"✅ Added **{count}** entries to the master list. Refresh the page to see them.")
-                st.balloons()
-            else:
-                st.warning("No valid entries found. Each line needs a name and an @ handle.")
-
-    # --- VIEW RAW FILE ---
-    # Expandable section to see the raw file contents (for power users)
-    with st.expander("🔧 View/edit raw file contents"):
-        st.caption(f"File: `{MASTER_LIST_PATH}`")
-        raw_content = load_master_list()
-        st.text_area(
-            "Raw file contents (read-only here — edit the file directly for changes):",
-            raw_content if raw_content else "(empty)",
-            height=300,
-            disabled=True,
-            key="raw_master",
-        )
